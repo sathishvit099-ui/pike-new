@@ -18,22 +18,16 @@ jobs:
         with:
           ref: test1
 
-      - name: Install Azure CLI
-        uses: azure/CLI@v2
-        with:
-          azcliversion: latest
-          inlineScript: |
-            az version
-
       - name: Validate input JSON
         shell: bash
         run: |
           set -euo pipefail
           jq empty input.json
-          for key in resourceGroupName location tags vnet subnet vm; do
-            jq -e --arg key "$key" '.[$key] != null' input.json >/dev/null
+          jq -e '.environment and .location and .landingZones' input.json >/dev/null
+
+          for key in resourceGroups nsgs routeTables vnets subnets storageAccounts keyVaults vms sqlDatabases; do
+            jq -e --arg key "$key" '.landingZones[$key] | type == "array"' input.json >/dev/null
           done
-          jq -e '.vnet.name and .vnet.addressPrefix and .subnet.name and .subnet.addressPrefix and .nic.name and .vm.name and .vm.size and .vm.adminUsername and .vm.sshPublicKey and .vm.osDiskSizeGB' input.json >/dev/null
 
       - name: Azure login using OIDC
         uses: azure/login@v2
@@ -42,39 +36,52 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Create resource group and deploy
+      - name: Generate Bicep parameter file
         shell: bash
         run: |
           set -euo pipefail
-
-          RG=$(jq -r '.resourceGroupName' input.json)
-          LOCATION=$(jq -r '.location' input.json)
-
-          az group create \
-            --name "$RG" \
-            --location "$LOCATION" \
-            --tags $(jq -r '.tags | to_entries | map("\(.key)=\(.value)") | join(" ")' input.json)
-
           jq '{
             "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
             "contentVersion": "1.0.0.0",
             "parameters": {
-              "location": {"value": .location},
-              "tags": {"value": .tags},
-              "vnet": {"value": .vnet},
-              "subnet": {"value": .subnet},
-              "nic": {"value": .nic},
-              "vm": {"value": .vm}
+              "environment": { "value": .environment },
+              "location": { "value": .location },
+              "landingZones": { "value": .landingZones }
             }
           }' input.json > generated.parameters.json
 
-          az deployment group validate \
-            --resource-group "$RG" \
-            --template-file main.bicep \
-            --parameters @generated.parameters.json
+      - name: Validate subscription deployment
+        shell: bash
+        env:
+          VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$VM_ADMIN_PASSWORD"
+          test -n "$SQL_ADMIN_PASSWORD"
 
-          az deployment group create \
-            --name "deploy-${GITHUB_RUN_NUMBER}" \
-            --resource-group "$RG" \
-            --template-file main.bicep \
-            --parameters @generated.parameters.json
+          LOCATION=$(jq -r '.location' input.json)
+
+          az deployment sub validate \
+            --location "$LOCATION" \
+            --template-file modules/main.bicep \
+            --parameters @generated.parameters.json \
+            vmAdminPassword="$VM_ADMIN_PASSWORD" \
+            sqlAdminPassword="$SQL_ADMIN_PASSWORD"
+
+      - name: Deploy subscription infrastructure
+        shell: bash
+        env:
+          VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          LOCATION=$(jq -r '.location' input.json)
+
+          az deployment sub create \
+            --name "pike-${GITHUB_RUN_NUMBER}" \
+            --location "$LOCATION" \
+            --template-file modules/main.bicep \
+            --parameters @generated.parameters.json \
+            vmAdminPassword="$VM_ADMIN_PASSWORD" \
+            sqlAdminPassword="$SQL_ADMIN_PASSWORD"
