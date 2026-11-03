@@ -33,7 +33,7 @@ jobs:
           for key in resourceGroupName location tags vnet subnet vm; do
             jq -e --arg key "$key" '.[$key] != null' input.json >/dev/null
           done
-          jq -e '.vnet.name and .vnet.addressPrefix and .subnet.name and .subnet.addressPrefix and .vm.name and .vm.size and .vm.adminUsername and .vm.sshPublicKey and .vm.osDiskSizeGB' input.json >/dev/null
+          jq -e '.vnet.name and .vnet.addressPrefix and .subnet.name and .subnet.addressPrefix and .nic.name and .vm.name and .vm.size and .vm.adminUsername and .vm.sshPublicKey and .vm.osDiskSizeGB' input.json >/dev/null
 
       - name: Azure login using OIDC
         uses: azure/login@v2
@@ -63,6 +63,7 @@ jobs:
               "tags": {"value": .tags},
               "vnet": {"value": .vnet},
               "subnet": {"value": .subnet},
+              "nic": {"value": .nic},
               "vm": {"value": .vm}
             }
           }' input.json > generated.parameters.json
