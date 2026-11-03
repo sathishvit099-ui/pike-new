@@ -145,7 +145,7 @@
         "serverName": "sql-pikehex-dev-031126",
         "databaseName": "sqldb-pikehex-dev-031126",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "location": "centralus",
         "administratorLogin": "pikehexsqladmin",
         "sqlServerVersion": "12.0",
         "databaseSkuName": "Basic",
