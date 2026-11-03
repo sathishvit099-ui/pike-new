@@ -163,11 +163,11 @@
     ],
     "openAiServices": [
       {
-        "name": "oai-pikehex-dev-cus-001",
+        "name": "oai-pikehex-dev-cus-041126-x7k",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "skuName": "S0",
-        "customSubDomainName": "oai-pikehex-dev-cus-001",
+        "customSubDomainName": "oai-pikehex-dev-cus-041126-x7k",
         "publicNetworkAccess": "Enabled",
         "tags": {
           "Environment": "dev",
