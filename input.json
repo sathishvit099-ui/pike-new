@@ -13,33 +13,6 @@
         }
       }
     ],
-    "nsgs": [
-      {
-        "name": "nsg-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
-        "tags": {
-          "Environment": "dev",
-          "Workload": "pikehex-cloud-migration",
-          "ManagedBy": "Bicep"
-        },
-        "securityRules": []
-      }
-    ],
-    "routeTables": [
-      {
-        "name": "rt-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
-        "disableBgpRoutePropagation": false,
-        "routes": [],
-        "tags": {
-          "Environment": "dev",
-          "Workload": "pikehex-cloud-migration",
-          "ManagedBy": "Bicep"
-        }
-      }
-    ],
     "vnets": [
       {
         "name": "vnet-pikehex-dev-001",
@@ -69,9 +42,9 @@
         "privateLinkServiceNetworkPolicies": "Enabled"
       }
     ],
-    "storageAccounts": [
+    "nsgs": [
       {
-        "name": "stpikehexdevcus003",
+        "name": "nsg-pikehex-dev-001",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "tags": {
@@ -79,32 +52,16 @@
           "Workload": "pikehex-cloud-migration",
           "ManagedBy": "Bicep"
         },
-        "skuName": "Standard_LRS",
-        "kind": "StorageV2",
-        "accessTier": "Hot",
-        "minimumTlsVersion": "TLS1_2",
-        "supportsHttpsTrafficOnly": true,
-        "allowBlobPublicAccess": false,
-        "allowSharedKeyAccess": true,
-        "publicNetworkAccess": "Enabled",
-        "blobServiceName": "default",
-        "containerNames": [
-          "appdata"
-        ],
-        "containerPublicAccess": "None"
+        "securityRules": []
       }
     ],
-    "keyVaults": [
+    "routeTables": [
       {
-        "name": "kv-pikehex-dev201",
+        "name": "rt-pikehex-dev-001",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
-        "skuName": "standard",
-        "skuFamily": "A",
-        "enableRbacAuthorization": true,
-        "enablePurgeProtection": true,
-        "softDeleteRetentionInDays": 7,
-        "publicNetworkAccess": "Enabled",
+        "disableBgpRoutePropagation": false,
+        "routes": [],
         "tags": {
           "Environment": "dev",
           "Workload": "pikehex-cloud-migration",
@@ -139,6 +96,49 @@
         }
       }
     ],
+    "keyVaults": [
+      {
+        "name": "kv-pikehex-dev201",
+        "resourceGroupName": "rg-pikehex-dev-eastus-001",
+        "location": "eastus",
+        "skuName": "standard",
+        "skuFamily": "A",
+        "enableRbacAuthorization": true,
+        "enablePurgeProtection": true,
+        "softDeleteRetentionInDays": 7,
+        "publicNetworkAccess": "Enabled",
+        "tags": {
+          "Environment": "dev",
+          "Workload": "pikehex-cloud-migration",
+          "ManagedBy": "Bicep"
+        }
+      }
+    ],
+    "storageAccounts": [
+      {
+        "name": "stpikehexdevcus003",
+        "resourceGroupName": "rg-pikehex-dev-eastus-001",
+        "location": "eastus",
+        "tags": {
+          "Environment": "dev",
+          "Workload": "pikehex-cloud-migration",
+          "ManagedBy": "Bicep"
+        },
+        "skuName": "Standard_LRS",
+        "kind": "StorageV2",
+        "accessTier": "Hot",
+        "minimumTlsVersion": "TLS1_2",
+        "supportsHttpsTrafficOnly": true,
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": true,
+        "publicNetworkAccess": "Enabled",
+        "blobServiceName": "default",
+        "containerNames": [
+          "appdata"
+        ],
+        "containerPublicAccess": "None"
+      }
+    ],
     "sqlDatabases": [
       {
         "serverName": "sql-pikehex-dev-cus-001",
@@ -162,11 +162,11 @@
     ],
     "openAiServices": [
       {
-        "name": "oai-pikehex-dev-eastus-001",
+        "name": "oai-pikehex-dev-cus-001",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "skuName": "S0",
-        "customSubDomainName": "oai-pikehex-dev-eastus-001",
+        "customSubDomainName": "oai-pikehex-dev-cus-001",
         "publicNetworkAccess": "Enabled",
         "tags": {
           "Environment": "dev",
