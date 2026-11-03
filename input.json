@@ -72,15 +72,15 @@
     ],
     "vms": [
       {
-        "name": "vm-pikehex-dev-001",
-        "computerName": "vm-pike-dev-001",
+        "name": "vm-pikehex-dev-031126",
+        "computerName": "vm-pike-dev-031126",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "adminUsername": "azureadmin",
-        "vmSize": "Standard_D2as_v5",
+        "vmSize": "Standard_B2ms",
         "vnetName": "vnet-pikehex-dev-001",
         "subnetName": "snet-app-dev-001",
-        "nicName": "nic-pikehex-dev-001",
+        "nicName": "nic-pikehex-dev-031126",
         "privateIpAllocationMethod": "Dynamic",
         "imagePublisher": "MicrosoftWindowsServer",
         "imageOffer": "WindowsServer",
@@ -99,7 +99,7 @@
     ],
     "keyVaults": [
       {
-        "name": "kv-pikehex-dev201",
+        "name": "kv-pikehex-dev031126",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "skuName": "standard",
@@ -142,8 +142,8 @@
     ],
     "sqlDatabases": [
       {
-        "serverName": "sql-pikehex-dev-cus-001",
-        "databaseName": "sqldb-pikehex-dev-001",
+        "serverName": "sql-pikehex-dev-031126",
+        "databaseName": "sqldb-pikehex-dev-031126",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "administratorLogin": "pikehexsqladmin",
