@@ -1,0 +1,1359 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.48.1.52935",
+      "templateHash": "4260202225734903052"
+    }
+  },
+  "parameters": {
+    "environment": {
+      "type": "string",
+      "allowedValues": [
+        "dev",
+        "test",
+        "uat",
+        "prod"
+      ],
+      "metadata": {
+        "description": "Deployment environment."
+      }
+    },
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Default Azure region."
+      }
+    },
+    "landingZones": {
+      "type": "object",
+      "metadata": {
+        "description": "Landing zone configuration."
+      }
+    },
+    "vmAdminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Windows VM administrator password."
+      }
+    },
+    "sqlAdminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "SQL administrator password."
+      }
+    }
+  },
+  "resources": [
+    {
+      "copy": {
+        "name": "resourceGroupModules",
+        "count": "[length(parameters('landingZones').resourceGroups)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('rg-{0}', parameters('landingZones').resourceGroups[copyIndex()].rgName)]",
+      "location": "[deployment().location]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "rgname": {
+            "value": "[parameters('landingZones').resourceGroups[copyIndex()].rgName]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').resourceGroups[copyIndex()].location]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').resourceGroups[copyIndex()].tags]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "16511149655988808086"
+            }
+          },
+          "parameters": {
+            "rgname": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "tags": {
+              "type": "object"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Resources/resourceGroups",
+              "apiVersion": "2021-04-01",
+              "name": "[parameters('rgname')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "copy": {
+        "name": "nsgModules",
+        "count": "[length(parameters('landingZones').nsgs)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('nsg-{0}', parameters('landingZones').nsgs[copyIndex()].name)]",
+      "resourceGroup": "[parameters('landingZones').nsgs[copyIndex()].resourceGroupName]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "nsgName": {
+            "value": "[parameters('landingZones').nsgs[copyIndex()].name]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').nsgs[copyIndex()].location]"
+          },
+          "securityRules": {
+            "value": "[parameters('landingZones').nsgs[copyIndex()].securityRules]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').nsgs[copyIndex()].tags]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "2024793874708079658"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "nsgName": {
+              "type": "string",
+              "metadata": {
+                "description": "Network security group name."
+              }
+            },
+            "securityRules": {
+              "type": "array",
+              "metadata": {
+                "description": "Security rule objects matching Azure NSG security rule properties."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2023-09-01",
+              "name": "[parameters('nsgName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "copy": [
+                  {
+                    "name": "securityRules",
+                    "count": "[length(parameters('securityRules'))]",
+                    "input": {
+                      "name": "[parameters('securityRules')[copyIndex('securityRules')].name]",
+                      "properties": {
+                        "description": "[if(contains(parameters('securityRules')[copyIndex('securityRules')], 'description'), parameters('securityRules')[copyIndex('securityRules')].description, null())]",
+                        "protocol": "[parameters('securityRules')[copyIndex('securityRules')].protocol]",
+                        "sourcePortRange": "[parameters('securityRules')[copyIndex('securityRules')].sourcePortRange]",
+                        "destinationPortRange": "[parameters('securityRules')[copyIndex('securityRules')].destinationPortRange]",
+                        "sourceAddressPrefix": "[parameters('securityRules')[copyIndex('securityRules')].sourceAddressPrefix]",
+                        "destinationAddressPrefix": "[parameters('securityRules')[copyIndex('securityRules')].destinationAddressPrefix]",
+                        "access": "[parameters('securityRules')[copyIndex('securityRules')].access]",
+                        "priority": "[parameters('securityRules')[copyIndex('securityRules')].priority]",
+                        "direction": "[parameters('securityRules')[copyIndex('securityRules')].direction]"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "outputs": {
+            "nsgId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/networkSecurityGroups', parameters('nsgName'))]"
+            },
+            "nsgNameOut": {
+              "type": "string",
+              "value": "[parameters('nsgName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "resourceGroupModules"
+      ]
+    },
+    {
+      "copy": {
+        "name": "routeTableModules",
+        "count": "[length(parameters('landingZones').routeTables)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('rt-{0}', parameters('landingZones').routeTables[copyIndex()].name)]",
+      "resourceGroup": "[parameters('landingZones').routeTables[copyIndex()].resourceGroupName]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "routeTableName": {
+            "value": "[parameters('landingZones').routeTables[copyIndex()].name]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').routeTables[copyIndex()].location]"
+          },
+          "disableBgpRoutePropagation": {
+            "value": "[parameters('landingZones').routeTables[copyIndex()].disableBgpRoutePropagation]"
+          },
+          "routes": {
+            "value": "[parameters('landingZones').routeTables[copyIndex()].routes]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').routeTables[copyIndex()].tags]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "17929929659023834868"
+            }
+          },
+          "parameters": {
+            "routeTableName": {
+              "type": "string",
+              "metadata": {
+                "description": "Route table name."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "disableBgpRoutePropagation": {
+              "type": "bool",
+              "metadata": {
+                "description": "Disable BGP route propagation."
+              }
+            },
+            "routes": {
+              "type": "array",
+              "metadata": {
+                "description": "Route objects matching Azure route properties."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/routeTables",
+              "apiVersion": "2023-09-01",
+              "name": "[parameters('routeTableName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "copy": [
+                  {
+                    "name": "routes",
+                    "count": "[length(parameters('routes'))]",
+                    "input": {
+                      "name": "[parameters('routes')[copyIndex('routes')].name]",
+                      "properties": {
+                        "addressPrefix": "[parameters('routes')[copyIndex('routes')].addressPrefix]",
+                        "nextHopType": "[parameters('routes')[copyIndex('routes')].nextHopType]",
+                        "nextHopIpAddress": "[if(contains(parameters('routes')[copyIndex('routes')], 'nextHopIpAddress'), parameters('routes')[copyIndex('routes')].nextHopIpAddress, null())]"
+                      }
+                    }
+                  }
+                ],
+                "disableBgpRoutePropagation": "[parameters('disableBgpRoutePropagation')]"
+              }
+            }
+          ],
+          "outputs": {
+            "routeTableId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/routeTables', parameters('routeTableName'))]"
+            },
+            "routeTableNameOut": {
+              "type": "string",
+              "value": "[parameters('routeTableName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "resourceGroupModules"
+      ]
+    },
+    {
+      "copy": {
+        "name": "vnetModules",
+        "count": "[length(parameters('landingZones').vnets)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('vnet-{0}', parameters('landingZones').vnets[copyIndex()].name)]",
+      "resourceGroup": "[parameters('landingZones').vnets[copyIndex()].resourceGroupName]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "vnetName": {
+            "value": "[parameters('landingZones').vnets[copyIndex()].name]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').vnets[copyIndex()].location]"
+          },
+          "addressPrefixes": {
+            "value": "[parameters('landingZones').vnets[copyIndex()].addressPrefixes]"
+          },
+          "dnsServers": {
+            "value": "[parameters('landingZones').vnets[copyIndex()].dnsServers]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').vnets[copyIndex()].tags]"
+          },
+          "subnets": {
+            "value": "[map(filter(parameters('landingZones').subnets, lambda('subnet', equals(lambdaVariables('subnet').vnetName, parameters('landingZones').vnets[copyIndex()].name))), lambda('subnet', createObject('name', lambdaVariables('subnet').name, 'properties', createObject('addressPrefix', lambdaVariables('subnet').addressPrefix, 'serviceEndpoints', lambdaVariables('subnet').serviceEndpoints, 'privateEndpointNetworkPolicies', lambdaVariables('subnet').privateEndpointNetworkPolicies, 'privateLinkServiceNetworkPolicies', lambdaVariables('subnet').privateLinkServiceNetworkPolicies, 'networkSecurityGroup', if(not(empty(lambdaVariables('subnet').networkSecurityGroupName)), createObject('id', format('/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.Network/networkSecurityGroups/{2}', subscription().subscriptionId, parameters('landingZones').vnets[copyIndex()].resourceGroupName, lambdaVariables('subnet').networkSecurityGroupName)), null()), 'routeTable', if(not(empty(lambdaVariables('subnet').routeTableName)), createObject('id', format('/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.Network/routeTables/{2}', subscription().subscriptionId, parameters('landingZones').vnets[copyIndex()].resourceGroupName, lambdaVariables('subnet').routeTableName)), null())))))]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "6249834001027014502"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "vnetName": {
+              "type": "string",
+              "metadata": {
+                "description": "Virtual network name."
+              }
+            },
+            "addressPrefixes": {
+              "type": "array",
+              "metadata": {
+                "description": "Virtual network CIDR prefixes."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags."
+              }
+            },
+            "dnsServers": {
+              "type": "array",
+              "metadata": {
+                "description": "Custom DNS server IP addresses; use an empty array for Azure-provided DNS."
+              }
+            },
+            "subnets": {
+              "type": "array",
+              "metadata": {
+                "description": "Complete subnet definitions belonging to this VNet."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/virtualNetworks",
+              "apiVersion": "2023-09-01",
+              "name": "[parameters('vnetName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "addressSpace": {
+                  "addressPrefixes": "[parameters('addressPrefixes')]"
+                },
+                "dhcpOptions": "[if(not(empty(parameters('dnsServers'))), createObject('dnsServers', parameters('dnsServers')), null())]",
+                "subnets": "[parameters('subnets')]"
+              }
+            }
+          ],
+          "outputs": {
+            "vnetId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+            },
+            "vnetNameOut": {
+              "type": "string",
+              "value": "[parameters('vnetName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "nsgModules",
+        "resourceGroupModules",
+        "routeTableModules"
+      ]
+    },
+    {
+      "copy": {
+        "name": "storageAccountModules",
+        "count": "[length(parameters('landingZones').storageAccounts)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('storage-{0}', parameters('landingZones').storageAccounts[copyIndex()].name)]",
+      "resourceGroup": "[parameters('landingZones').storageAccounts[copyIndex()].resourceGroupName]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "storageAccountName": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].name]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].location]"
+          },
+          "skuName": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].skuName]"
+          },
+          "kind": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].kind]"
+          },
+          "accessTier": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].accessTier]"
+          },
+          "minimumTlsVersion": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].minimumTlsVersion]"
+          },
+          "supportsHttpsTrafficOnly": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].supportsHttpsTrafficOnly]"
+          },
+          "allowBlobPublicAccess": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].allowBlobPublicAccess]"
+          },
+          "allowSharedKeyAccess": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].allowSharedKeyAccess]"
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].publicNetworkAccess]"
+          },
+          "blobServiceName": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].blobServiceName]"
+          },
+          "containerNames": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].containerNames]"
+          },
+          "containerPublicAccess": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].containerPublicAccess]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').storageAccounts[copyIndex()].tags]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "131989500362326994"
+            }
+          },
+          "parameters": {
+            "storageAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Storage account name; globally unique, lowercase, 3-24 characters."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags."
+              }
+            },
+            "skuName": {
+              "type": "string",
+              "metadata": {
+                "description": "Storage account SKU."
+              }
+            },
+            "kind": {
+              "type": "string",
+              "metadata": {
+                "description": "Storage account kind."
+              }
+            },
+            "accessTier": {
+              "type": "string",
+              "metadata": {
+                "description": "Blob access tier."
+              }
+            },
+            "minimumTlsVersion": {
+              "type": "string",
+              "metadata": {
+                "description": "Minimum TLS version."
+              }
+            },
+            "supportsHttpsTrafficOnly": {
+              "type": "bool",
+              "metadata": {
+                "description": "Require HTTPS for data-plane traffic."
+              }
+            },
+            "allowBlobPublicAccess": {
+              "type": "bool",
+              "metadata": {
+                "description": "Allow anonymous blob access."
+              }
+            },
+            "allowSharedKeyAccess": {
+              "type": "bool",
+              "metadata": {
+                "description": "Allow Shared Key authorization."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Public network access setting."
+              }
+            },
+            "containerNames": {
+              "type": "array",
+              "metadata": {
+                "description": "Container names to create."
+              }
+            },
+            "blobServiceName": {
+              "type": "string",
+              "metadata": {
+                "description": "Blob service name (normally default)."
+              }
+            },
+            "containerPublicAccess": {
+              "type": "string",
+              "allowedValues": [
+                "None",
+                "Blob",
+                "Container"
+              ],
+              "metadata": {
+                "description": "Container public access level."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2023-05-01",
+              "name": "[parameters('storageAccountName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "[parameters('skuName')]"
+              },
+              "kind": "[parameters('kind')]",
+              "properties": {
+                "accessTier": "[parameters('accessTier')]",
+                "minimumTlsVersion": "[parameters('minimumTlsVersion')]",
+                "supportsHttpsTrafficOnly": "[parameters('supportsHttpsTrafficOnly')]",
+                "allowBlobPublicAccess": "[parameters('allowBlobPublicAccess')]",
+                "allowSharedKeyAccess": "[parameters('allowSharedKeyAccess')]",
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]"
+              }
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}', parameters('storageAccountName'), parameters('blobServiceName'))]",
+              "properties": {
+                "deleteRetentionPolicy": {
+                  "enabled": false,
+                  "allowPermanentDelete": false
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "containers",
+                "count": "[length(parameters('containerNames'))]"
+              },
+              "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+              "apiVersion": "2023-05-01",
+              "name": "[format('{0}/{1}/{2}', parameters('storageAccountName'), parameters('blobServiceName'), parameters('containerNames')[copyIndex()])]",
+              "properties": {
+                "publicAccess": "[parameters('containerPublicAccess')]",
+                "defaultEncryptionScope": "$account-encryption-key",
+                "denyEncryptionScopeOverride": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), parameters('blobServiceName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "storageAccountId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+            },
+            "storageAccountNameOut": {
+              "type": "string",
+              "value": "[parameters('storageAccountName')]"
+            },
+            "containerNamesOut": {
+              "type": "array",
+              "value": "[parameters('containerNames')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "resourceGroupModules"
+      ]
+    },
+    {
+      "copy": {
+        "name": "keyVaultModules",
+        "count": "[length(parameters('landingZones').keyVaults)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('keyvault-{0}', parameters('landingZones').keyVaults[copyIndex()].name)]",
+      "resourceGroup": "[parameters('landingZones').keyVaults[copyIndex()].resourceGroupName]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "keyVaultName": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].name]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].location]"
+          },
+          "tenantId": {
+            "value": "[tenant().tenantId]"
+          },
+          "skuName": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].skuName]"
+          },
+          "skuFamily": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].skuFamily]"
+          },
+          "enableRbacAuthorization": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].enableRbacAuthorization]"
+          },
+          "enablePurgeProtection": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].enablePurgeProtection]"
+          },
+          "softDeleteRetentionInDays": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].softDeleteRetentionInDays]"
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].publicNetworkAccess]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').keyVaults[copyIndex()].tags]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "6635354865654730617"
+            }
+          },
+          "parameters": {
+            "keyVaultName": {
+              "type": "string",
+              "metadata": {
+                "description": "Key Vault name."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "tenantId": {
+              "type": "string",
+              "metadata": {
+                "description": "Microsoft Entra tenant ID."
+              }
+            },
+            "skuName": {
+              "type": "string",
+              "allowedValues": [
+                "standard",
+                "premium"
+              ],
+              "metadata": {
+                "description": "Key Vault SKU name."
+              }
+            },
+            "skuFamily": {
+              "type": "string",
+              "allowedValues": [
+                "A"
+              ],
+              "metadata": {
+                "description": "Key Vault SKU family."
+              }
+            },
+            "enableRbacAuthorization": {
+              "type": "bool",
+              "metadata": {
+                "description": "Use Azure RBAC for data-plane authorization."
+              }
+            },
+            "enablePurgeProtection": {
+              "type": "bool",
+              "metadata": {
+                "description": "Enable purge protection."
+              }
+            },
+            "softDeleteRetentionInDays": {
+              "type": "int",
+              "minValue": 7,
+              "maxValue": 90,
+              "metadata": {
+                "description": "Soft-delete retention in days."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Public network access setting."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.KeyVault/vaults",
+              "apiVersion": "2023-07-01",
+              "name": "[parameters('keyVaultName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "tenantId": "[parameters('tenantId')]",
+                "enableRbacAuthorization": "[parameters('enableRbacAuthorization')]",
+                "enablePurgeProtection": "[parameters('enablePurgeProtection')]",
+                "softDeleteRetentionInDays": "[parameters('softDeleteRetentionInDays')]",
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+                "sku": {
+                  "name": "[parameters('skuName')]",
+                  "family": "[parameters('skuFamily')]"
+                }
+              }
+            }
+          ],
+          "outputs": {
+            "keyVaultId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+            },
+            "keyVaultNameOut": {
+              "type": "string",
+              "value": "[parameters('keyVaultName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "resourceGroupModules"
+      ]
+    },
+    {
+      "copy": {
+        "name": "windowsVmModules",
+        "count": "[length(parameters('landingZones').vms)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('vm-{0}', parameters('landingZones').vms[copyIndex()].name)]",
+      "resourceGroup": "[parameters('landingZones').vms[copyIndex()].resourceGroupName]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "vmName": {
+            "value": "[parameters('landingZones').vms[copyIndex()].name]"
+          },
+          "computerName": {
+            "value": "[parameters('landingZones').vms[copyIndex()].computerName]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').vms[copyIndex()].location]"
+          },
+          "adminUsername": {
+            "value": "[parameters('landingZones').vms[copyIndex()].adminUsername]"
+          },
+          "vmAdminPassword": {
+            "value": "[parameters('vmAdminPassword')]"
+          },
+          "vmSize": {
+            "value": "[parameters('landingZones').vms[copyIndex()].vmSize]"
+          },
+          "imagePublisher": {
+            "value": "[parameters('landingZones').vms[copyIndex()].imagePublisher]"
+          },
+          "imageOffer": {
+            "value": "[parameters('landingZones').vms[copyIndex()].imageOffer]"
+          },
+          "imageSku": {
+            "value": "[parameters('landingZones').vms[copyIndex()].imageSku]"
+          },
+          "imageVersion": {
+            "value": "[parameters('landingZones').vms[copyIndex()].imageVersion]"
+          },
+          "osDiskCreateOption": {
+            "value": "[parameters('landingZones').vms[copyIndex()].osDiskCreateOption]"
+          },
+          "osDiskSizeGB": {
+            "value": "[parameters('landingZones').vms[copyIndex()].osDiskSizeGB]"
+          },
+          "osDiskStorageAccountType": {
+            "value": "[parameters('landingZones').vms[copyIndex()].osDiskStorageAccountType]"
+          },
+          "enableBootDiagnostics": {
+            "value": "[parameters('landingZones').vms[copyIndex()].enableBootDiagnostics]"
+          },
+          "nicName": {
+            "value": "[parameters('landingZones').vms[copyIndex()].nicName]"
+          },
+          "vnetName": {
+            "value": "[parameters('landingZones').vms[copyIndex()].vnetName]"
+          },
+          "subnetName": {
+            "value": "[parameters('landingZones').vms[copyIndex()].subnetName]"
+          },
+          "privateIpAllocationMethod": {
+            "value": "[parameters('landingZones').vms[copyIndex()].privateIpAllocationMethod]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').vms[copyIndex()].tags]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "11001736153842045733"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "computerName": {
+              "type": "string",
+              "metadata": {
+                "description": "Windows computer name."
+              }
+            },
+            "vmName": {
+              "type": "string",
+              "metadata": {
+                "description": "Windows VM name."
+              }
+            },
+            "adminUsername": {
+              "type": "string",
+              "metadata": {
+                "description": "Local administrator username."
+              }
+            },
+            "vmAdminPassword": {
+              "type": "securestring",
+              "metadata": {
+                "description": "Local administrator password."
+              }
+            },
+            "vmSize": {
+              "type": "string",
+              "metadata": {
+                "description": "VM size."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags."
+              }
+            },
+            "vnetName": {
+              "type": "string",
+              "metadata": {
+                "description": "Virtual network name in this resource group."
+              }
+            },
+            "subnetName": {
+              "type": "string",
+              "metadata": {
+                "description": "Subnet name in the virtual network."
+              }
+            },
+            "nicName": {
+              "type": "string",
+              "metadata": {
+                "description": "Network interface name."
+              }
+            },
+            "privateIpAllocationMethod": {
+              "type": "string",
+              "allowedValues": [
+                "Dynamic",
+                "Static"
+              ],
+              "metadata": {
+                "description": "Private IP allocation method."
+              }
+            },
+            "imagePublisher": {
+              "type": "string",
+              "metadata": {
+                "description": "Marketplace image publisher."
+              }
+            },
+            "imageOffer": {
+              "type": "string",
+              "metadata": {
+                "description": "Marketplace image offer."
+              }
+            },
+            "imageSku": {
+              "type": "string",
+              "metadata": {
+                "description": "Marketplace image SKU."
+              }
+            },
+            "imageVersion": {
+              "type": "string",
+              "metadata": {
+                "description": "Marketplace image version."
+              }
+            },
+            "osDiskStorageAccountType": {
+              "type": "string",
+              "metadata": {
+                "description": "Managed OS disk storage account type."
+              }
+            },
+            "osDiskCreateOption": {
+              "type": "string",
+              "allowedValues": [
+                "FromImage"
+              ],
+              "metadata": {
+                "description": "OS disk create option."
+              }
+            },
+            "osDiskSizeGB": {
+              "type": "int",
+              "metadata": {
+                "description": "OS disk size in GB; null uses the image default."
+              }
+            },
+            "enableBootDiagnostics": {
+              "type": "bool",
+              "metadata": {
+                "description": "Enable boot diagnostics."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/networkInterfaces",
+              "apiVersion": "2023-09-01",
+              "name": "[parameters('nicName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "ipConfigurations": [
+                  {
+                    "name": "[format('{0}-ipconfig', parameters('nicName'))]",
+                    "properties": {
+                      "subnet": {
+                        "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('vnetName'), parameters('subnetName'))]"
+                      },
+                      "privateIPAllocationMethod": "[parameters('privateIpAllocationMethod')]"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines",
+              "apiVersion": "2024-03-01",
+              "name": "[parameters('vmName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "hardwareProfile": {
+                  "vmSize": "[parameters('vmSize')]"
+                },
+                "osProfile": {
+                  "computerName": "[parameters('computerName')]",
+                  "adminUsername": "[parameters('adminUsername')]",
+                  "adminPassword": "[parameters('vmAdminPassword')]"
+                },
+                "storageProfile": {
+                  "imageReference": {
+                    "publisher": "[parameters('imagePublisher')]",
+                    "offer": "[parameters('imageOffer')]",
+                    "sku": "[parameters('imageSku')]",
+                    "version": "[parameters('imageVersion')]"
+                  },
+                  "osDisk": {
+                    "createOption": "[parameters('osDiskCreateOption')]",
+                    "managedDisk": {
+                      "storageAccountType": "[parameters('osDiskStorageAccountType')]"
+                    },
+                    "diskSizeGB": "[if(greater(parameters('osDiskSizeGB'), 0), parameters('osDiskSizeGB'), null())]"
+                  }
+                },
+                "networkProfile": {
+                  "networkInterfaces": [
+                    {
+                      "id": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]",
+                      "properties": {
+                        "primary": true
+                      }
+                    }
+                  ]
+                },
+                "diagnosticsProfile": {
+                  "bootDiagnostics": {
+                    "enabled": "[parameters('enableBootDiagnostics')]"
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "vmId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('vmName'))]"
+            },
+            "vmNameOut": {
+              "type": "string",
+              "value": "[parameters('vmName')]"
+            },
+            "networkInterfaceId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/networkInterfaces', parameters('nicName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "resourceGroupModules",
+        "vnetModules"
+      ]
+    },
+    {
+      "copy": {
+        "name": "sqlModules",
+        "count": "[length(parameters('landingZones').sqlDatabases)]"
+      },
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "[format('sql-{0}', parameters('landingZones').sqlDatabases[copyIndex()].serverName)]",
+      "resourceGroup": "[parameters('landingZones').sqlDatabases[copyIndex()].resourceGroupName]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "serverName": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].serverName]"
+          },
+          "location": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].location]"
+          },
+          "administratorLogin": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].administratorLogin]"
+          },
+          "administratorLoginPassword": {
+            "value": "[parameters('sqlAdminPassword')]"
+          },
+          "sqlServerVersion": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].sqlServerVersion]"
+          },
+          "databaseName": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].databaseName]"
+          },
+          "databaseSkuName": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].databaseSkuName]"
+          },
+          "databaseSkuTier": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].databaseSkuTier]"
+          },
+          "databaseCapacity": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].databaseCapacity]"
+          },
+          "databaseMaxSizeBytes": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].databaseMaxSizeBytes]"
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].publicNetworkAccess]"
+          },
+          "minimumTlsVersion": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].minimumTlsVersion]"
+          },
+          "tags": {
+            "value": "[parameters('landingZones').sqlDatabases[copyIndex()].tags]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.48.1.52935",
+              "templateHash": "8014734693305729608"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region."
+              }
+            },
+            "serverName": {
+              "type": "string",
+              "metadata": {
+                "description": "Globally unique SQL logical server name."
+              }
+            },
+            "databaseName": {
+              "type": "string",
+              "metadata": {
+                "description": "SQL database name."
+              }
+            },
+            "administratorLogin": {
+              "type": "string",
+              "metadata": {
+                "description": "SQL administrator login."
+              }
+            },
+            "administratorLoginPassword": {
+              "type": "securestring",
+              "metadata": {
+                "description": "SQL administrator password."
+              }
+            },
+            "sqlServerVersion": {
+              "type": "string",
+              "metadata": {
+                "description": "SQL Server version."
+              }
+            },
+            "databaseSkuName": {
+              "type": "string",
+              "metadata": {
+                "description": "Database SKU name."
+              }
+            },
+            "databaseSkuTier": {
+              "type": "string",
+              "metadata": {
+                "description": "Database SKU tier."
+              }
+            },
+            "databaseCapacity": {
+              "type": "int",
+              "metadata": {
+                "description": "Database SKU capacity."
+              }
+            },
+            "databaseMaxSizeBytes": {
+              "type": "int",
+              "metadata": {
+                "description": "Maximum database size in bytes."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Public network access setting."
+              }
+            },
+            "minimumTlsVersion": {
+              "type": "string",
+              "metadata": {
+                "description": "Minimum TLS version."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Sql/servers",
+              "apiVersion": "2021-11-01",
+              "name": "[parameters('serverName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "administratorLogin": "[parameters('administratorLogin')]",
+                "administratorLoginPassword": "[parameters('administratorLoginPassword')]",
+                "version": "[parameters('sqlServerVersion')]",
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+                "minimalTlsVersion": "[parameters('minimumTlsVersion')]"
+              }
+            },
+            {
+              "type": "Microsoft.Sql/servers/databases",
+              "apiVersion": "2021-11-01",
+              "name": "[format('{0}/{1}', parameters('serverName'), parameters('databaseName'))]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "sku": {
+                "name": "[parameters('databaseSkuName')]",
+                "tier": "[parameters('databaseSkuTier')]",
+                "capacity": "[parameters('databaseCapacity')]"
+              },
+              "properties": {
+                "maxSizeBytes": "[parameters('databaseMaxSizeBytes')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "sqlServerId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+            },
+            "sqlServerNameOut": {
+              "type": "string",
+              "value": "[parameters('serverName')]"
+            },
+            "sqlDatabaseId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Sql/servers/databases', parameters('serverName'), parameters('databaseName'))]"
+            },
+            "sqlDatabaseNameOut": {
+              "type": "string",
+              "value": "[parameters('databaseName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "resourceGroupModules"
+      ]
+    }
+  ]
+}
