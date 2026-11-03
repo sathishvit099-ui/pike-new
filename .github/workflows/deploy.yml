@@ -75,7 +75,7 @@ jobs:
           set -euo pipefail
           jq -c '.landingZones.vnets[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" '{parameters:{location:{value:$x.location},vnetName:{value:$x.name},addressPrefixes:{value:$x.addressPrefixes},dnsServers:{value:$x.dnsServers},tags:{value:$x.tags},subnets:{value:[]}}}' > params.json
+            jq -n --argjson x "$x" --slurpfile cfg input.json --arg subscriptionId "$(az account show --query id -o tsv)" '{parameters:{location:{value:$x.location},vnetName:{value:$x.name},addressPrefixes:{value:$x.addressPrefixes},dnsServers:{value:$x.dnsServers},tags:{value:$x.tags},subnets:{value:([$cfg[0].landingZones.subnets[] | select(.vnetName == $x.name) | {name:.name,properties:{addressPrefix:.addressPrefix,serviceEndpoints:.serviceEndpoints,privateEndpointNetworkPolicies:.privateEndpointNetworkPolicies,privateLinkServiceNetworkPolicies:.privateLinkServiceNetworkPolicies,networkSecurityGroup:(if (.networkSecurityGroupName // "") != "" then {id:("/subscriptions/" + $subscriptionId + "/resourceGroups/" + $x.resourceGroupName + "/providers/Microsoft.Network/networkSecurityGroups/" + .networkSecurityGroupName)} else null end),routeTable:(if (.routeTableName // "") != "" then {id:("/subscriptions/" + $subscriptionId + "/resourceGroups/" + $x.resourceGroupName + "/providers/Microsoft.Network/routeTables/" + .routeTableName)} else null end)}}])}}' > params.json
             az deployment group create -g "$rg" --name "vnet-$GITHUB_RUN_NUMBER" --template-file modules/networking/vnet.bicep --parameters @params.json
           done
 
