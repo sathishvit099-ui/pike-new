@@ -1,105 +1,126 @@
-name: Deploy Bicep modules from input.json
+name: Deploy Azure resources from input.json
+
 on:
   workflow_dispatch:
+
 permissions:
   id-token: write
   contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: dev
+
     steps:
       - name: Checkout test1
         uses: actions/checkout@v4
         with:
           ref: test1
 
-      - name: Validate input
+      - name: Validate input.json
+        shell: bash
         run: |
           set -euo pipefail
           jq empty input.json
-          jq -e '.environment and .location and .landingZones' input.json >/dev/null
+          jq -e '.environment and .location and (.landingZones | type == "object")' input.json >/dev/null
+          for key in resourceGroups nsgs routeTables vnets subnets storageAccounts keyVaults vms sqlDatabases openAiServices; do
+            jq -e --arg key "$key" '.landingZones[$key] | type == "array"' input.json >/dev/null
+          done
 
-      - name: Azure login
+      - name: Azure login with OIDC
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Install Bicep
-        uses: azure/CLI@v2
-        with:
-          azcliversion: latest
-          inlineScript: |
-            az bicep install
-
-      - name: Compile Bicep modules
+      - name: Install Bicep and compile deployment modules
+        shell: bash
         run: |
           set -euo pipefail
-          find modules -name '*.bicep' -print0 | while IFS= read -r -d '' file; do
-            az bicep build --file "$file"
+          az bicep install
+          for file in \
+            modules/resourcegroup.bicep \
+            modules/networking/nsg.bicep \
+            modules/networking/routetable.bicep \
+            modules/networking/vnet.bicep \
+            modules/storage/storageAccount.bicep \
+            modules/security/keyvault.bicep \
+            modules/compute/vm.bicep \
+            modules/database/sql.bicep \
+            modules/ai/openai.bicep; do
+            echo "Checking $file"
+            az bicep build --file "$file" --stdout >/dev/null
           done
 
       - name: Deploy resource groups
+        shell: bash
         run: |
           set -euo pipefail
           jq -c '.landingZones.resourceGroups[]' input.json | while read -r x; do
-            jq -n --argjson x "$x" '{parameters:{rgname:{value:$x.rgName},location:{value:$x.location},tags:{value:$x.tags}}}' > params.json
-            az deployment sub create --location "$(jq -r '.location' <<< "$x")" --template-file modules/resourcegroup.bicep --parameters @params.json
+            location=$(jq -r '.location' <<< "$x")
+            jq -n --argjson x "$x" '{parameters:{rgname:{value:$x.rgName},location:{value:$x.location},tags:{value:$x.tags}}}' > params-rg.json
+            az deployment sub create --name "rg-${GITHUB_RUN_NUMBER}-$(jq -r '.rgName' <<< "$x")" --location "$location" --template-file modules/resourcegroup.bicep --parameters @params-rg.json
           done
 
-      - name: Deploy NSGs
+      - name: Deploy network security groups
+        shell: bash
         run: |
           set -euo pipefail
           jq -c '.landingZones.nsgs[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" '{parameters:{location:{value:$x.location},nsgName:{value:$x.name},securityRules:{value:$x.securityRules},tags:{value:$x.tags}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/networking/nsg.bicep --parameters @params.json
+            jq -n --argjson x "$x" '{parameters:{location:{value:$x.location},nsgName:{value:$x.name},securityRules:{value:$x.securityRules},tags:{value:$x.tags}}}' > params-nsg.json
+            az deployment group create --resource-group "$rg" --name "nsg-${GITHUB_RUN_NUMBER}" --template-file modules/networking/nsg.bicep --parameters @params-nsg.json
           done
 
       - name: Deploy route tables
+        shell: bash
         run: |
           set -euo pipefail
           jq -c '.landingZones.routeTables[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" '{parameters:{routeTableName:{value:$x.name},location:{value:$x.location},disableBgpRoutePropagation:{value:$x.disableBgpRoutePropagation},routes:{value:$x.routes},tags:{value:$x.tags}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/networking/routetable.bicep --parameters @params.json
+            jq -n --argjson x "$x" '{parameters:{routeTableName:{value:$x.name},location:{value:$x.location},disableBgpRoutePropagation:{value:$x.disableBgpRoutePropagation},routes:{value:$x.routes},tags:{value:$x.tags}}}' > params-rt.json
+            az deployment group create --resource-group "$rg" --name "rt-${GITHUB_RUN_NUMBER}" --template-file modules/networking/routetable.bicep --parameters @params-rt.json
           done
 
-      - name: Deploy VNets with subnets
+      - name: Deploy virtual networks and their subnets
+        shell: bash
         env:
           SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           set -euo pipefail
           jq -c '.landingZones.vnets[]' input.json | while read -r x; do
-            name=$(jq -r '.name' <<< "$x")
+            vnet_name=$(jq -r '.name' <<< "$x")
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            subs=$(jq -c --arg n "$name" --arg sub "$SUBSCRIPTION_ID" '[.landingZones.subnets[] | select(.vnetName==$n) | {name:.name,properties:{addressPrefix:.addressPrefix,serviceEndpoints:.serviceEndpoints,privateEndpointNetworkPolicies:.privateEndpointNetworkPolicies,privateLinkServiceNetworkPolicies:.privateLinkServiceNetworkPolicies,networkSecurityGroup:(if .networkSecurityGroupName=="" then null else {id:("/subscriptions/"+$sub+"/resourceGroups/"+.resourceGroupName+"/providers/Microsoft.Network/networkSecurityGroups/"+.networkSecurityGroupName)} end),routeTable:(if .routeTableName=="" then null else {id:("/subscriptions/"+$sub+"/resourceGroups/"+.resourceGroupName+"/providers/Microsoft.Network/routeTables/"+.routeTableName)} end)}}]' input.json)
-            jq -n --argjson x "$x" --argjson subs "$subs" '{parameters:{location:{value:$x.location},vnetName:{value:$x.name},addressPrefixes:{value:$x.addressPrefixes},dnsServers:{value:$x.dnsServers},tags:{value:$x.tags},subnets:{value:$subs}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/networking/vnet.bicep --parameters @params.json
+            subnet_data=$(jq -c --arg n "$vnet_name" --arg sub "$SUBSCRIPTION_ID" '[.landingZones.subnets[] | select(.vnetName == $n) | {name:.name,properties:{addressPrefix:.addressPrefix,serviceEndpoints:.serviceEndpoints,privateEndpointNetworkPolicies:.privateEndpointNetworkPolicies,privateLinkServiceNetworkPolicies:.privateLinkServiceNetworkPolicies,networkSecurityGroup:(if (.networkSecurityGroupName // "") == "" then null else {id:("/subscriptions/"+$sub+"/resourceGroups/"+.resourceGroupName+"/providers/Microsoft.Network/networkSecurityGroups/"+.networkSecurityGroupName)} end),routeTable:(if (.routeTableName // "") == "" then null else {id:("/subscriptions/"+$sub+"/resourceGroups/"+.resourceGroupName+"/providers/Microsoft.Network/routeTables/"+.routeTableName)} end)}}]' input.json)
+            jq -n --argjson x "$x" --argjson subs "$subnet_data" '{parameters:{location:{value:$x.location},vnetName:{value:$x.name},addressPrefixes:{value:$x.addressPrefixes},dnsServers:{value:$x.dnsServers},tags:{value:$x.tags},subnets:{value:$subs}}}' > params-vnet.json
+            az deployment group create --resource-group "$rg" --name "vnet-${GITHUB_RUN_NUMBER}" --template-file modules/networking/vnet.bicep --parameters @params-vnet.json
           done
 
-      - name: Deploy Storage Accounts
+      - name: Deploy storage accounts
+        shell: bash
         run: |
           set -euo pipefail
           jq -c '.landingZones.storageAccounts[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" '{parameters:{storageAccountName:{value:$x.name},location:{value:$x.location},tags:{value:$x.tags},skuName:{value:$x.skuName},kind:{value:$x.kind},accessTier:{value:$x.accessTier},minimumTlsVersion:{value:$x.minimumTlsVersion},supportsHttpsTrafficOnly:{value:$x.supportsHttpsTrafficOnly},allowBlobPublicAccess:{value:$x.allowBlobPublicAccess},allowSharedKeyAccess:{value:$x.allowSharedKeyAccess},publicNetworkAccess:{value:$x.publicNetworkAccess},containerNames:{value:$x.containerNames},blobServiceName:{value:$x.blobServiceName},containerPublicAccess:{value:$x.containerPublicAccess}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/storage/storageAccount.bicep --parameters @params.json
+            jq -n --argjson x "$x" '{parameters:{storageAccountName:{value:$x.name},location:{value:$x.location},tags:{value:$x.tags},skuName:{value:$x.skuName},kind:{value:$x.kind},accessTier:{value:$x.accessTier},minimumTlsVersion:{value:$x.minimumTlsVersion},supportsHttpsTrafficOnly:{value:$x.supportsHttpsTrafficOnly},allowBlobPublicAccess:{value:$x.allowBlobPublicAccess},allowSharedKeyAccess:{value:$x.allowSharedKeyAccess},publicNetworkAccess:{value:$x.publicNetworkAccess},containerNames:{value:$x.containerNames},blobServiceName:{value:$x.blobServiceName},containerPublicAccess:{value:$x.containerPublicAccess}}}' > params-storage.json
+            az deployment group create --resource-group "$rg" --name "storage-${GITHUB_RUN_NUMBER}" --template-file modules/storage/storageAccount.bicep --parameters @params-storage.json
           done
 
       - name: Deploy Key Vaults
+        shell: bash
         run: |
           set -euo pipefail
-          tenant=$(az account show --query tenantId -o tsv)
+          tenant_id=$(az account show --query tenantId --output tsv)
           jq -c '.landingZones.keyVaults[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" --arg tenant "$tenant" '{parameters:{keyVaultName:{value:$x.name},location:{value:$x.location},tenantId:{value:$tenant},skuName:{value:$x.skuName},skuFamily:{value:$x.skuFamily},enableRbacAuthorization:{value:$x.enableRbacAuthorization},enablePurgeProtection:{value:$x.enablePurgeProtection},softDeleteRetentionInDays:{value:$x.softDeleteRetentionInDays},publicNetworkAccess:{value:$x.publicNetworkAccess},tags:{value:$x.tags}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/security/keyvault.bicep --parameters @params.json
+            jq -n --argjson x "$x" --arg tenant "$tenant_id" '{parameters:{keyVaultName:{value:$x.name},location:{value:$x.location},tenantId:{value:$tenant},skuName:{value:$x.skuName},skuFamily:{value:$x.skuFamily},enableRbacAuthorization:{value:$x.enableRbacAuthorization},enablePurgeProtection:{value:$x.enablePurgeProtection},softDeleteRetentionInDays:{value:$x.softDeleteRetentionInDays},publicNetworkAccess:{value:$x.publicNetworkAccess},tags:{value:$x.tags}}}' > params-kv.json
+            az deployment group create --resource-group "$rg" --name "keyvault-${GITHUB_RUN_NUMBER}" --template-file modules/security/keyvault.bicep --parameters @params-kv.json
           done
 
-      - name: Deploy Windows VMs
+      - name: Deploy Windows virtual machines
+        shell: bash
         env:
           VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
         run: |
@@ -107,11 +128,12 @@ jobs:
           test -n "$VM_ADMIN_PASSWORD"
           jq -c '.landingZones.vms[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" --arg password "$VM_ADMIN_PASSWORD" '{parameters:{location:{value:$x.location},computerName:{value:$x.computerName},vmName:{value:$x.name},adminUsername:{value:$x.adminUsername},vmAdminPassword:{value:$password},vmSize:{value:$x.vmSize},tags:{value:$x.tags},vnetName:{value:$x.vnetName},subnetName:{value:$x.subnetName},nicName:{value:$x.nicName},privateIpAllocationMethod:{value:$x.privateIpAllocationMethod},imagePublisher:{value:$x.imagePublisher},imageOffer:{value:$x.imageOffer},imageSku:{value:$x.imageSku},imageVersion:{value:$x.imageVersion},osDiskStorageAccountType:{value:$x.osDiskStorageAccountType},osDiskCreateOption:{value:$x.osDiskCreateOption},osDiskSizeGB:{value:$x.osDiskSizeGB},enableBootDiagnostics:{value:$x.enableBootDiagnostics}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/compute/vm.bicep --parameters @params.json
+            jq -n --argjson x "$x" --arg password "$VM_ADMIN_PASSWORD" '{parameters:{location:{value:$x.location},computerName:{value:$x.computerName},vmName:{value:$x.name},adminUsername:{value:$x.adminUsername},vmAdminPassword:{value:$password},vmSize:{value:$x.vmSize},tags:{value:$x.tags},vnetName:{value:$x.vnetName},subnetName:{value:$x.subnetName},nicName:{value:$x.nicName},privateIpAllocationMethod:{value:$x.privateIpAllocationMethod},imagePublisher:{value:$x.imagePublisher},imageOffer:{value:$x.imageOffer},imageSku:{value:$x.imageSku},imageVersion:{value:$x.imageVersion},osDiskStorageAccountType:{value:$x.osDiskStorageAccountType},osDiskCreateOption:{value:$x.osDiskCreateOption},osDiskSizeGB:{value:$x.osDiskSizeGB},enableBootDiagnostics:{value:$x.enableBootDiagnostics}}}' > params-vm.json
+            az deployment group create --resource-group "$rg" --name "vm-${GITHUB_RUN_NUMBER}" --template-file modules/compute/vm.bicep --parameters @params-vm.json
           done
 
-      - name: Deploy SQL databases
+      - name: Deploy SQL servers and databases
+        shell: bash
         env:
           SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
         run: |
@@ -119,15 +141,16 @@ jobs:
           test -n "$SQL_ADMIN_PASSWORD"
           jq -c '.landingZones.sqlDatabases[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" --arg password "$SQL_ADMIN_PASSWORD" '{parameters:{location:{value:$x.location},serverName:{value:$x.serverName},databaseName:{value:$x.databaseName},administratorLogin:{value:$x.administratorLogin},administratorLoginPassword:{value:$password},sqlServerVersion:{value:$x.sqlServerVersion},databaseSkuName:{value:$x.databaseSkuName},databaseSkuTier:{value:$x.databaseSkuTier},databaseCapacity:{value:$x.databaseCapacity},databaseMaxSizeBytes:{value:$x.databaseMaxSizeBytes},publicNetworkAccess:{value:$x.publicNetworkAccess},minimumTlsVersion:{value:$x.minimumTlsVersion},tags:{value:$x.tags}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/database/sql.bicep --parameters @params.json
+            jq -n --argjson x "$x" --arg password "$SQL_ADMIN_PASSWORD" '{parameters:{location:{value:$x.location},serverName:{value:$x.serverName},databaseName:{value:$x.databaseName},administratorLogin:{value:$x.administratorLogin},administratorLoginPassword:{value:$password},sqlServerVersion:{value:$x.sqlServerVersion},databaseSkuName:{value:$x.databaseSkuName},databaseSkuTier:{value:$x.databaseSkuTier},databaseCapacity:{value:$x.databaseCapacity},databaseMaxSizeBytes:{value:$x.databaseMaxSizeBytes},publicNetworkAccess:{value:$x.publicNetworkAccess},minimumTlsVersion:{value:$x.minimumTlsVersion},tags:{value:$x.tags}}}' > params-sql.json
+            az deployment group create --resource-group "$rg" --name "sql-${GITHUB_RUN_NUMBER}" --template-file modules/database/sql.bicep --parameters @params-sql.json
           done
 
-      - name: Deploy Azure OpenAI
+      - name: Deploy Azure OpenAI services
+        shell: bash
         run: |
           set -euo pipefail
           jq -c '.landingZones.openAiServices[]' input.json | while read -r x; do
             rg=$(jq -r '.resourceGroupName' <<< "$x")
-            jq -n --argjson x "$x" '{parameters:{accountName:{value:$x.name},location:{value:$x.location},skuName:{value:$x.skuName},customSubDomainName:{value:$x.customSubDomainName},publicNetworkAccess:{value:$x.publicNetworkAccess},tags:{value:$x.tags}}}' > params.json
-            az deployment group create -g "$rg" --template-file modules/ai/openai.bicep --parameters @params.json
+            jq -n --argjson x "$x" '{parameters:{accountName:{value:$x.name},location:{value:$x.location},skuName:{value:$x.skuName},customSubDomainName:{value:$x.customSubDomainName},publicNetworkAccess:{value:$x.publicNetworkAccess},tags:{value:$x.tags}}}' > params-openai.json
+            az deployment group create --resource-group "$rg" --name "openai-${GITHUB_RUN_NUMBER}" --template-file modules/ai/openai.bicep --parameters @params-openai.json
           done
