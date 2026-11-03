@@ -11,6 +11,7 @@ param vnet object
 
 @description('Subnet configuration.')
 param subnet object
+param nic object
 
 @description('Linux virtual machine configuration.')
 param vm object
@@ -41,7 +42,7 @@ module networkInterface './modules/nic.bicep' = {
   name: 'deploy-nic'
   params: {
     location: location
-    nicName: '${vm.name}-nic'
+    nicName: nic.name
     subnetId: applicationSubnet.outputs.subnetId
     tags: tags
   }
