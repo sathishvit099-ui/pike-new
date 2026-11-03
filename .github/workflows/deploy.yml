@@ -1,4 +1,4 @@
-name: Deploy Azure infrastructure
+name: Deploy Azure infrastructure from input.json
 
 on:
   workflow_dispatch:
@@ -9,37 +9,63 @@ permissions:
 
 jobs:
   deploy:
+    name: Deploy from input.json
     runs-on: ubuntu-latest
     environment: dev
 
     steps:
-      - name: Checkout test1
+      - name: Checkout test1 branch
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.repository }}
           ref: test1
 
-      - name: Validate input JSON
+      - name: Install Azure CLI and Bicep
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az version
+            az bicep install
+            az bicep version
+
+      - name: Validate input.json structure
         shell: bash
         run: |
           set -euo pipefail
-          jq empty input.json
-          jq -e '.environment and .location and .landingZones' input.json >/dev/null
 
-          for key in resourceGroups nsgs routeTables vnets subnets storageAccounts keyVaults vms sqlDatabases; do
+          jq empty input.json
+
+          jq -e '
+            (.environment | type == "string") and
+            (.location | type == "string") and
+            (.landingZones | type == "object")
+          ' input.json >/dev/null
+
+          for key in resourceGroups nsgs routeTables vnets subnets storageAccounts keyVaults vms sqlDatabases openAiServices; do
             jq -e --arg key "$key" '.landingZones[$key] | type == "array"' input.json >/dev/null
           done
 
-      - name: Azure login using OIDC
+          echo "input.json is valid and contains all module configuration arrays."
+
+      - name: Azure login using OpenID Connect
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Generate Bicep parameter file
+      - name: Confirm target subscription
         shell: bash
         run: |
           set -euo pipefail
+          az account show --query '{subscription:name, subscriptionId:id, tenantId:tenantId}' --output table
+
+      - name: Convert input.json to Bicep parameter file
+        shell: bash
+        run: |
+          set -euo pipefail
+
           jq '{
             "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
             "contentVersion": "1.0.0.0",
@@ -50,15 +76,31 @@ jobs:
             }
           }' input.json > generated.parameters.json
 
-      - name: Validate subscription deployment
+          jq empty generated.parameters.json
+
+      - name: Compile Bicep orchestrator
+        shell: bash
+        run: |
+          set -euo pipefail
+          az bicep build --file modules/main.bicep
+
+      - name: Validate Azure subscription deployment
         shell: bash
         env:
           VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
           SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
-          test -n "$VM_ADMIN_PASSWORD"
-          test -n "$SQL_ADMIN_PASSWORD"
+
+          if [[ -z "$VM_ADMIN_PASSWORD" ]]; then
+            echo "GitHub environment secret VM_ADMIN_PASSWORD is missing."
+            exit 1
+          fi
+
+          if [[ -z "$SQL_ADMIN_PASSWORD" ]]; then
+            echo "GitHub environment secret SQL_ADMIN_PASSWORD is missing."
+            exit 1
+          fi
 
           LOCATION=$(jq -r '.location' input.json)
 
@@ -69,13 +111,14 @@ jobs:
             vmAdminPassword="$VM_ADMIN_PASSWORD" \
             sqlAdminPassword="$SQL_ADMIN_PASSWORD"
 
-      - name: Deploy subscription infrastructure
+      - name: Deploy Azure resources
         shell: bash
         env:
           VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
           SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
+
           LOCATION=$(jq -r '.location' input.json)
 
           az deployment sub create \
