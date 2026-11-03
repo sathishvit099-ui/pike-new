@@ -73,7 +73,7 @@
     "vms": [
       {
         "name": "vm-pikehex-dev-031126",
-        "computerName": "vm-pike-dev-031126",
+        "computerName": "pikevm031126",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "adminUsername": "azureadmin",
