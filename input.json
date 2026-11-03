@@ -1,0 +1,24 @@
+{
+  "resourceGroupName": "rg-bicep-dev-eastus",
+  "location": "eastus",
+  "tags": {
+    "Environment": "Dev",
+    "Project": "BicepStarter",
+    "ManagedBy": "GitHubActions"
+  },
+  "vnet": {
+    "name": "vnet-dev-eastus-001",
+    "addressPrefix": "10.10.0.0/16"
+  },
+  "subnet": {
+    "name": "snet-app",
+    "addressPrefix": "10.10.1.0/24"
+  },
+  "vm": {
+    "name": "vm-dev-eastus-001",
+    "size": "Standard_B2s",
+    "adminUsername": "azureuser",
+    "sshPublicKey": "REPLACE_WITH_YOUR_SSH_PUBLIC_KEY",
+    "osDiskSizeGB": 30
+  }
+}
