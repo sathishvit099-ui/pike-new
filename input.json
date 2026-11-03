@@ -14,6 +14,9 @@
     "name": "snet-app",
     "addressPrefix": "10.10.1.0/24"
   },
+  "nic": {
+    "name": "nic-dev-eastus-001"
+  },
   "vm": {
     "name": "vm-dev-eastus-001",
     "size": "Standard_B2s",
