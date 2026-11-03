@@ -26,7 +26,8 @@
           "Environment": "dev",
           "Workload": "pikehex-cloud-migration",
           "ManagedBy": "Bicep"
-        }
+        },
+        "subnets": []
       }
     ],
     "subnets": [
