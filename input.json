@@ -142,8 +142,8 @@
     ],
     "sqlDatabases": [
       {
-        "serverName": "sql-pikehex-dev-031126",
-        "databaseName": "sqldb-pikehex-dev-031126",
+        "serverName": "sql-pikehex-dev-cus-041126",
+        "databaseName": "sqldb-pikehex-dev-cus-041126",
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "centralus",
         "administratorLogin": "pikehexsqladmin",
