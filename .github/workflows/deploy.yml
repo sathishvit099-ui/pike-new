@@ -10,7 +10,6 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: dev
     steps:
       - name: Checkout test1
         uses: actions/checkout@v4
