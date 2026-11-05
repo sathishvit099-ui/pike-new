@@ -11,8 +11,6 @@ jobs:
   prechecks:
     name: Bicep lint and input validation
     runs-on: [self-hosted, X64, Windows]
-    outputs:
-      subscription_id: ${{ steps.config.outputs.subscription_id }}
     steps:
       - uses: actions/checkout@v4
       - name: Check Azure CLI, Bicep and required secrets
@@ -39,28 +37,19 @@ jobs:
             & $az bicep build --file $file.FullName --stdout | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "Bicep build failed: $($file.Name)" }
           }
-      - name: Read Dev subscription from config/subscriptions.json
-        id: config
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $items = Get-Content "config/subscriptions.json" -Raw | ConvertFrom-Json
-          if ($items -is [System.Array]) {
-            $entry = @($items | Where-Object { $_.environment -eq "dev" }) | Select-Object -First 1
-          } else {
-            $entry = $items.dev
-            if (-not $entry) { $entry = $items }
-          }
-          if (-not $entry -or [string]::IsNullOrWhiteSpace($entry.sub_id)) {
-            throw "Could not find sub_id for dev in config/subscriptions.json."
-          }
-          "subscription_id=$($entry.sub_id)" >> $env:GITHUB_OUTPUT
       - name: Validate input.json structure
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
-          if ($cfg.environment -ne "dev") { throw "input.json environment must be dev." }
+          $environment = ([string]$cfg.environment).Trim().ToLowerInvariant()
+          Write-Host "Environment found in input.json: '$environment'"
+          if ([string]::IsNullOrWhiteSpace($environment)) {
+            throw "input.json must contain a root-level 'environment' property with value 'dev'."
+          }
+          if ($environment -ne "dev") {
+            throw "Expected environment 'dev' in input.json, but found '$environment'."
+          }
           if (-not $cfg.landingZones.resourceGroups -or @($cfg.landingZones.resourceGroups).Count -eq 0) {
             throw "No resource groups found in input.json."
           }
@@ -80,13 +69,13 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Verify selected subscription
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
-          & $az account set --subscription "${{ needs.prechecks.outputs.subscription_id }}"
+          & $az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
           if ($LASTEXITCODE -ne 0) { throw "Could not select subscription." }
           & $az account show --query "{name:name,id:id,tenantId:tenantId}" -o json
           if ($LASTEXITCODE -ne 0) { throw "Azure subscription verification failed." }
@@ -102,7 +91,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Resource Groups
         shell: pwsh
         run: |
@@ -129,7 +118,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy NSGs
         shell: pwsh
         run: |
@@ -155,7 +144,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Route Tables
         shell: pwsh
         run: |
@@ -178,7 +167,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy VNets safely
         shell: pwsh
         run: |
@@ -203,7 +192,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Subnets
         shell: pwsh
         run: |
@@ -226,7 +215,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Key Vaults
         shell: pwsh
         run: |
@@ -249,7 +238,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Storage Accounts
         shell: pwsh
         run: |
@@ -272,7 +261,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy SQL Databases
         shell: pwsh
         env:
@@ -297,7 +286,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Azure OpenAI
         shell: pwsh
         run: |
@@ -320,7 +309,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Virtual Machines
         shell: pwsh
         env:
@@ -345,7 +334,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ needs.prechecks.outputs.subscription_id }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Check deployed resource provisioning states
         shell: pwsh
         env:
