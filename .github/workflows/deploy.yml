@@ -47,4 +47,144 @@ jobs:
             modules/networking/routetable.bicep \
             modules/networking/vnet.bicep \
             modules/networking/subnet.bicep \
-            modules/storage/storageAccount.
+            modules/storage/storageAccount.bicep \
+            modules/security/keyvault.bicep \
+            modules/compute/vm.bicep \
+            modules/database/sql.bicep \
+            modules/ai/openai.bicep
+          do
+            echo "Compiling $file"
+            az bicep build --file "$file" --stdout > /dev/null
+          done
+
+      - name: Deploy resource groups
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -c '.landingZones.resourceGroups[]' input.json | while read -r x; do
+            loc=$(jq -r '.location' <<< "$x")
+
+            jq -n --argjson x "$x" '{
+              parameters: {
+                rgname: { value: $x.rgName },
+                location: { value: $x.location },
+                tags: { value: $x.tags }
+              }
+            }' > params.json
+
+            az deployment sub create \
+              --name "rg-$GITHUB_RUN_NUMBER" \
+              --location "$loc" \
+              --template-file modules/resourcegroup.bicep \
+              --parameters @params.json
+          done
+
+      - name: Deploy NSGs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -c '.landingZones.nsgs[]' input.json | while read -r x; do
+            rg=$(jq -r '.resourceGroupName' <<< "$x")
+
+            jq -n --argjson x "$x" '{
+              parameters: {
+                location: { value: $x.location },
+                nsgName: { value: $x.name },
+                securityRules: { value: $x.securityRules },
+                tags: { value: $x.tags }
+              }
+            }' > params.json
+
+            az deployment group create \
+              -g "$rg" \
+              --name "nsg-$GITHUB_RUN_NUMBER" \
+              --template-file modules/networking/nsg.bicep \
+              --parameters @params.json
+          done
+
+      - name: Deploy route tables
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -c '.landingZones.routeTables[]' input.json | while read -r x; do
+            rg=$(jq -r '.resourceGroupName' <<< "$x")
+
+            jq -n --argjson x "$x" '{
+              parameters: {
+                routeTableName: { value: $x.name },
+                location: { value: $x.location },
+                disableBgpRoutePropagation: { value: $x.disableBgpRoutePropagation },
+                routes: { value: $x.routes },
+                tags: { value: $x.tags }
+              }
+            }' > params.json
+
+            az deployment group create \
+              -g "$rg" \
+              --name "rt-$GITHUB_RUN_NUMBER" \
+              --template-file modules/networking/routetable.bicep \
+              --parameters @params.json
+          done
+
+      - name: Deploy virtual networks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -c '.landingZones.vnets[]' input.json | while read -r x; do
+            rg=$(jq -r '.resourceGroupName' <<< "$x")
+            vnetName=$(jq -r '.name' <<< "$x")
+
+            if az network vnet show --resource-group "$rg" --name "$vnetName" > /dev/null 2>&1; then
+              echo "VNet $vnetName already exists; skipping VNet creation/update."
+              continue
+            fi
+
+            jq -n --argjson x "$x" '{
+              parameters: {
+                location: { value: $x.location },
+                vnetName: { value: $x.name },
+                addressPrefixes: { value: $x.addressPrefixes },
+                dnsServers: { value: $x.dnsServers },
+                tags: { value: $x.tags },
+                subnets: { value: [] }
+              }
+            }' > params.json
+
+            az deployment group create \
+              -g "$rg" \
+              --name "vnet-$GITHUB_RUN_NUMBER" \
+              --template-file modules/networking/vnet.bicep \
+              --parameters @params.json
+          done
+
+      - name: Deploy subnets and associate NSGs and route tables
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -c '.landingZones.subnets[]' input.json | while read -r x; do
+            rg=$(jq -r '.resourceGroupName' <<< "$x")
+
+            jq -n --argjson x "$x" '{
+              parameters: {
+                vnetName: { value: $x.vnetName },
+                subnetName: { value: $x.name },
+                addressPrefix: { value: $x.addressPrefix },
+                networkSecurityGroupName: { value: ($x.networkSecurityGroupName // "") },
+                routeTableName: { value: ($x.routeTableName // "") },
+                serviceEndpoints: { value: $x.serviceEndpoints },
+                privateEndpointNetworkPolicies: { value: $x.privateEndpointNetworkPolicies },
+                privateLinkServiceNetworkPolicies: { value: $x.privateLinkServiceNetworkPolicies }
+              }
+            }' > params.json
+
+            az deployment group create \
+              -g "$rg" \
+              --name "subnet-$GITHUB_RUN_NUMBER" \
+              --template-file modules/networking/subnet.bicep \
+              --parameters @params.json
+          done
