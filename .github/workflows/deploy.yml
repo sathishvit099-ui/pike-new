@@ -26,6 +26,22 @@ jobs:
             jq -e --arg key "$key" '.landingZones[$key] | type == "array"' input.json >/dev/null
           done
 
+      - name: Check subscription secret is available
+        shell: bash
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+            echo "::error::AZURE_SUBSCRIPTION_ID is empty or unavailable to this workflow."
+            exit 1
+          fi
+          if [[ ! "$AZURE_SUBSCRIPTION_ID" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "::error::AZURE_SUBSCRIPTION_ID is not in GUID format."
+            exit 1
+          fi
+          echo "AZURE_SUBSCRIPTION_ID is available and has GUID format. Value is masked and will not be printed."
+
       - name: Azure login using OIDC
         uses: azure/login@v2
         with:
