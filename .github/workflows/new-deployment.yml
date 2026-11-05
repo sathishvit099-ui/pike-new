@@ -64,6 +64,7 @@ jobs:
     environment: dev
     steps:
       - uses: actions/checkout@v4
+
       - name: Check subscription secret is available
         shell: pwsh
         env:
@@ -75,18 +76,30 @@ jobs:
             throw "AZURE_SUBSCRIPTION_ID is empty or unavailable to this workflow."
           }
 
-          if ($env:AZURE_SUBSCRIPTION_ID -notmatch '^[0-9a-fA-F-]{36}
+          if ($env:AZURE_SUBSCRIPTION_ID -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            throw "AZURE_SUBSCRIPTION_ID is not a valid GUID."
+          }
+
+          Write-Host "AZURE_SUBSCRIPTION_ID is available and has valid GUID format. The value will not be printed."
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Verify selected subscription
         shell: pwsh
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           $ErrorActionPreference = "Stop"
-          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
-          & $az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-          if ($LASTEXITCODE -ne 0) { throw "Could not select subscription." }
+          $az = "C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin\\az.cmd"
+
+          & $az account set --subscription $env:AZURE_SUBSCRIPTION_ID
+          if ($LASTEXITCODE -ne 0) { throw "Could not select the configured subscription." }
+
           & $az account show --query "{name:name,id:id,tenantId:tenantId}" -o json
           if ($LASTEXITCODE -ne 0) { throw "Azure subscription verification failed." }
 
