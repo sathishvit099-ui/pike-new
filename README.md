@@ -119,3 +119,38 @@ Change `Dev` if your working branch has a different name. Review `git status` be
 ## Subscription configuration
 
 `config/subscriptions.json` is kept as the source for environment-to-subscription and environment-to-parameter-file mapping. The workflow currently deploys only the `dev` entry. Add other environments only after their parameter files are populated and reviewed.
+
+## GitHub Actions secrets required
+
+Configure these repository or `dev` environment secrets before running the workflow:
+
+- `AZURE_CLIENT_ID` — Microsoft Entra application/service principal client ID used for OIDC.
+- `AZURE_TENANT_ID` — Microsoft Entra tenant ID.
+- `AZURE_SUBSCRIPTION_ID` — Azure subscription GUID (not the subscription name).
+- `VM_ADMIN_PASSWORD` — local administrator password for the VM.
+- `SQL_ADMIN_PASSWORD` — SQL administrator password.
+
+The workflow reads the subscription ID from `secrets.AZURE_SUBSCRIPTION_ID`; it does not read `config/subscriptions.json` or the `subscriptionId` placeholder in `input.json`. The secret name must be spelled exactly `AZURE_SUBSCRIPTION_ID`.
+
+The workflow is manually triggered using `workflow_dispatch` and runs on a Windows self-hosted runner with Azure CLI installed at `C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd`. Azure OIDC federation must also be configured for the repository/environment subject in Microsoft Entra ID.
+
+
+## Stable globally unique resource naming
+
+The following fixed candidate names are configured in `input.json` and are passed by `deploy.yml` to the Bicep modules. They are stable across repeated runs; they are not generated from the GitHub Actions run ID.
+
+- Key Vault: `kv-pikehex-dev-9m4x7`
+- Storage account: `stpikehexdev9m4x7`
+- Azure OpenAI account: `oai-pikehex-dev-9m4x7`
+- Azure OpenAI custom subdomain: `oai-pikehex-dev-9m4x7`
+
+Before deployment, check Key Vault and Storage Account availability:
+
+```bash
+az keyvault check-name --name kv-pikehex-dev-9m4x7 -o json
+az storage account check-name --name stpikehexdev9m4x7 -o json
+```
+
+Azure OpenAI account-name availability is also subject to Azure Cognitive Services name and regional availability checks. These candidate names have not been reserved or verified by this repository update. If Azure reports a name is unavailable, select another fixed suffix once, update `input.json`, and keep it unchanged for later runs.
+
+The workflow prints the configured Key Vault, Storage Account, and Azure OpenAI names in the corresponding deployment job logs to make it easier to confirm which `input.json` version was checked out.

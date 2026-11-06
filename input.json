@@ -1,11 +1,37 @@
 {
   "environment": "dev",
-  "location": "eastus",
+  "request": {
+    "ticketId": "PIKE-12345",
+    "requestedBy": "your.email@company.com",
+    "approved": true,
+    "environment": "dev",
+    "deploymentMethod": "Bicep",
+    "project": "PIKE-IAC"
+  },
+  "subscription": {
+    "name": "PIKE-SUBSCRIPTION",
+    "subscriptionId": "${AZURE_SUBSCRIPTION_ID}"
+  },
+  "deployment": {
+    "location": "centralus"
+  },
+  "deploymentPlan": {
+    "resourceGroups": "create",
+    "nsgs": "create",
+    "routeTables": "create",
+    "vnets": "create",
+    "subnets": "create",
+    "keyVaults": "create",
+    "storageAccounts": "create",
+    "sqlDatabases": "create",
+    "openAiServices": "create",
+    "vms": "create"
+  },
   "landingZones": {
     "resourceGroups": [
       {
-        "rgName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "rgName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
         "tags": {
           "Environment": "dev",
           "Workload": "pikehex-cloud-migration",
@@ -16,8 +42,8 @@
     "vnets": [
       {
         "name": "vnet-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
         "addressPrefixes": [
           "10.40.0.0/16"
         ],
@@ -26,15 +52,14 @@
           "Environment": "dev",
           "Workload": "pikehex-cloud-migration",
           "ManagedBy": "Bicep"
-        },
-        "subnets": []
+        }
       }
     ],
     "subnets": [
       {
         "name": "snet-app-dev-001",
         "vnetName": "vnet-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
         "addressPrefix": "10.40.1.0/24",
         "networkSecurityGroupName": "nsg-pikehex-dev-001",
         "routeTableName": "rt-pikehex-dev-001",
@@ -46,21 +71,21 @@
     "nsgs": [
       {
         "name": "nsg-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
+        "securityRules": [],
         "tags": {
           "Environment": "dev",
           "Workload": "pikehex-cloud-migration",
           "ManagedBy": "Bicep"
-        },
-        "securityRules": []
+        }
       }
     ],
     "routeTables": [
       {
         "name": "rt-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
         "disableBgpRoutePropagation": false,
         "routes": [],
         "tags": {
@@ -72,15 +97,20 @@
     ],
     "vms": [
       {
-        "name": "vm-pikehex-dev-031126",
-        "computerName": "pikevm031126",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "name": "vm-pikehex-dev-001",
+        "computerName": "vm-pike-dev-001",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
         "adminUsername": "azureadmin",
-        "vmSize": "Standard_B2ms",
+        "vmSize": "Standard_D2as_v5",
+        "tags": {
+          "Environment": "dev",
+          "Workload": "pikehex-cloud-migration",
+          "ManagedBy": "Bicep"
+        },
         "vnetName": "vnet-pikehex-dev-001",
         "subnetName": "snet-app-dev-001",
-        "nicName": "nic-pikehex-dev-031126",
+        "nicName": "nic-pikehex-dev-001",
         "privateIpAllocationMethod": "Dynamic",
         "imagePublisher": "MicrosoftWindowsServer",
         "imageOffer": "WindowsServer",
@@ -89,19 +119,14 @@
         "osDiskStorageAccountType": "StandardSSD_LRS",
         "osDiskCreateOption": "FromImage",
         "osDiskSizeGB": 128,
-        "enableBootDiagnostics": true,
-        "tags": {
-          "Environment": "dev",
-          "Workload": "pikehex-cloud-migration",
-          "ManagedBy": "Bicep"
-        }
+        "enableBootDiagnostics": true
       }
     ],
     "keyVaults": [
       {
-        "name": "kv-pikehex-dev031126",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "name": "kv-pikehex-dev-21399",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
         "skuName": "standard",
         "skuFamily": "A",
         "enableRbacAuthorization": true,
@@ -117,9 +142,9 @@
     ],
     "storageAccounts": [
       {
-        "name": "stpikehexdevcus031126",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "name": "stpikehexdev23199",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
         "tags": {
           "Environment": "dev",
           "Workload": "pikehex-cloud-migration",
@@ -142,9 +167,9 @@
     ],
     "sqlDatabases": [
       {
-        "serverName": "sql-pikehex-dev-cus-041126",
-        "databaseName": "sqldb-pikehex-dev-cus-041126",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
+        "serverName": "sql-pikehex-dev-cus-20261103-001",
+        "databaseName": "sqldb-pikehex-dev-001",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
         "location": "centralus",
         "administratorLogin": "pikehexsqladmin",
         "sqlServerVersion": "12.0",
@@ -163,11 +188,11 @@
     ],
     "openAiServices": [
       {
-        "name": "oai-pikehex-dev-cus-041126-x7k",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "name": "oai-pikehex-dev-231999",
+        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "location": "centralus",
         "skuName": "S0",
-        "customSubDomainName": "oai-pikehex-dev-cus-041126-x7k",
+        "customSubDomainName": "oai-pikehex-dev-9m4x7",
         "publicNetworkAccess": "Enabled",
         "tags": {
           "Environment": "dev",

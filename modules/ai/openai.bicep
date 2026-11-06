@@ -1,4 +1,6 @@
-@description('Azure OpenAI account name.')
+@description('Azure OpenAI account name. Must be globally available in the selected Azure region.')
+@minLength(2)
+@maxLength(64)
 param accountName string
 
 @description('Azure region.')
@@ -7,7 +9,9 @@ param location string
 @description('Azure OpenAI SKU name.')
 param skuName string
 
-@description('Custom subdomain name for the Azure OpenAI endpoint.')
+@description('Custom subdomain name for the Azure OpenAI endpoint; keep stable after creation.')
+@minLength(2)
+@maxLength(64)
 param customSubDomainName string
 
 @description('Public network access setting.')
