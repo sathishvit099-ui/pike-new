@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   prechecks:
-    name: Bicep lint and input validation
+    name: Bicep build/lint and input validation
     runs-on: [self-hosted, X64, Windows]
     steps:
       - uses: actions/checkout@v4
@@ -124,9 +124,9 @@ jobs:
           foreach ($x in @($cfg.landingZones.resourceGroups)) {
             $p = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{ rgname=@{value=$x.rgName}; location=@{value=$x.location}; tags=@{value=$x.tags} } }
             $p | ConvertTo-Json -Depth 100 | Set-Content "$env:RUNNER_TEMP\rg-params.json"
-            & $az deployment sub what-if --location $x.location --template-file "modules/RG/resourcegroup.bicep" --parameters "@$env:RUNNER_TEMP\rg-params.json"
+            & $az deployment sub what-if --location $x.location --template-file "modules/resourcegroup.bicep" --parameters "@$env:RUNNER_TEMP\rg-params.json"
             if ($LASTEXITCODE -ne 0) { throw "Resource group What-If failed: $($x.rgName)" }
-            & $az deployment sub create --name "pike-rg-${{ github.run_id }}" --location $x.location --template-file "modules/RG/resourcegroup.bicep" --parameters "@$env:RUNNER_TEMP\rg-params.json"
+            & $az deployment sub create --name "pike-rg-${{ github.run_id }}" --location $x.location --template-file "modules/resourcegroup.bicep" --parameters "@$env:RUNNER_TEMP\rg-params.json"
             if ($LASTEXITCODE -ne 0) { throw "Resource group deployment failed: $($x.rgName)" }
           }
 
