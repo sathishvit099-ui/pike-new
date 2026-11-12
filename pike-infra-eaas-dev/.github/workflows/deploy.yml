@@ -1,0 +1,142 @@
+name: PIKE Modular Azure Infrastructure Deployment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy PIKE infrastructure (Windows)
+    runs-on: [self-hosted, X64, Windows]
+    environment: dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: \${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: \${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate configuration and compile Bicep
+        shell: pwsh
+        env:
+          VM_ADMIN_PASSWORD: \${{ secrets.VM_ADMIN_PASSWORD }}
+          SQL_ADMIN_PASSWORD: \${{ secrets.SQL_ADMIN_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $az = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
+          if (-not (Test-Path $az)) { throw "Azure CLI not found at $az. Install it or correct the path on the runner." }
+          & $az bicep install
+          if ($LASTEXITCODE -ne 0) { throw 'Bicep install failed.' }
+          $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
+          if ($cfg.environment -ne 'dev') { throw "Expected environment dev, found $($cfg.environment)." }
+          $required = @('resourceGroups','nsgs','routeTables','vnets','subnets','applicationGatewaySubnets','loadBalancers','applicationGateways','keyVaults','storageAccounts','sqlDatabases','openAiServices','vms')
+          foreach ($key in $required) {
+            if ($null -eq $cfg.landingZones.$key) { throw "landingZones.$key is missing from input.json." }
+          }
+          if ([string]::IsNullOrWhiteSpace($env:VM_ADMIN_PASSWORD)) { throw 'VM_ADMIN_PASSWORD GitHub secret is missing.' }
+          if ([string]::IsNullOrWhiteSpace($env:SQL_ADMIN_PASSWORD)) { throw 'SQL_ADMIN_PASSWORD GitHub secret is missing.' }
+          Get-ChildItem 'modules' -Recurse -Filter '*.bicep' | ForEach-Object {
+            Write-Host "Compiling $($_.FullName)"
+            & $az bicep build --file $_.FullName --stdout | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Bicep compilation failed: $($_.FullName)" }
+          }
+
+      - name: Deploy Resource Groups
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $az = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
+          $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
+          foreach ($x in @($cfg.landingZones.resourceGroups)) {
+            $p = @{ rgname=@{value=$x.rgName}; location=@{value=$x.location}; tags=@{value=$x.tags} } | ConvertTo-Json -Depth 100
+            $f = "$env:RUNNER_TEMP\rg-params.json"; $p | Set-Content $f
+            & $az deployment sub what-if --location $x.location --template-file 'modules/RG/resourcegroup.bicep' --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Resource group What-If failed: $($x.rgName)" }
+            & $az deployment sub create --name "pike-rg-\${{ github.run_id }}" --location $x.location --template-file 'modules/RG/resourcegroup.bicep' --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Resource group deployment failed: $($x.rgName)" }
+          }
+
+      - name: Deploy networking, Load Balancer and Application Gateway
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $az = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
+          $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
+          function Invoke-GroupBicep([string]$ResourceGroup,[string]$Template,[hashtable]$Values,[string]$Name) {
+            $params = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($key in $Values.Keys) { $params.parameters[$key] = @{ value=$Values[$key] } }
+            $file = Join-Path $env:RUNNER_TEMP "$Name-params.json"
+            $params | ConvertTo-Json -Depth 100 | Set-Content $file
+            & $az deployment group what-if -g $ResourceGroup -f $Template --parameters "@$file"
+            if ($LASTEXITCODE -ne 0) { throw "What-If failed for $Template in $ResourceGroup." }
+            & $az deployment group create -g $ResourceGroup -n "$Name-\${{ github.run_id }}" -f $Template --parameters "@$file"
+            if ($LASTEXITCODE -ne 0) { throw "Deployment failed for $Template in $ResourceGroup." }
+          }
+          foreach ($x in @($cfg.landingZones.nsgs)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/networking/nsg.bicep' @{location=$x.location;nsgName=$x.name;securityRules=@($x.securityRules);tags=$x.tags} 'nsg'
+          }
+          foreach ($x in @($cfg.landingZones.routeTables)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/networking/routetable.bicep' @{routeTableName=$x.name;location=$x.location;disableBgpRoutePropagation=$x.disableBgpRoutePropagation;routes=@($x.routes);tags=$x.tags} 'route'
+          }
+          foreach ($x in @($cfg.landingZones.vnets)) {
+            & $az network vnet show -g $x.resourceGroupName -n $x.name 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Host "VNet $($x.name) exists; skipping to avoid replacing existing subnet configuration."; continue }
+            Invoke-GroupBicep $x.resourceGroupName 'modules/networking/vnet.bicep' @{location=$x.location;vnetName=$x.name;addressPrefixes=@($x.addressPrefixes);dnsServers=@($x.dnsServers);tags=$x.tags;subnets=@()} 'vnet'
+          }
+          foreach ($x in @($cfg.landingZones.subnets)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/networking/subnet.bicep' @{vnetName=$x.vnetName;subnetName=$x.name;addressPrefix=$x.addressPrefix;networkSecurityGroupName=$x.networkSecurityGroupName;routeTableName=$x.routeTableName;serviceEndpoints=@($x.serviceEndpoints);privateEndpointNetworkPolicies=$x.privateEndpointNetworkPolicies;privateLinkServiceNetworkPolicies=$x.privateLinkServiceNetworkPolicies} 'subnet'
+          }
+          foreach ($x in @($cfg.landingZones.applicationGatewaySubnets)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/networking/applicationGatewaySubnet.bicep' @{vnetName=$x.vnetName;subnetName=$x.subnetName;subnetAddressPrefix=$x.subnetAddressPrefix} 'appgw-subnet'
+          }
+          foreach ($x in @($cfg.landingZones.loadBalancers)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/loadbalancer/lb.bicep' @{loadBalancerName=$x.name;location=$x.location;skuName=$x.skuName;skuTier=$x.skuTier;tags=$x.tags;vnetName=$x.vnetName;subnetName=$x.subnetName;frontends=@($x.frontends);backendPools=@($x.backendPools);probes=@($x.probes);loadBalancingRules=@($x.loadBalancingRules)} 'loadbalancer'
+          }
+          foreach ($x in @($cfg.landingZones.applicationGateways)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/networking/applicationGateway.bicep' @{applicationGatewayName=$x.applicationGatewayName;location=$x.location;vnetName=$x.vnetName;subnetName=$x.subnetName;publicIpName=$x.publicIpName;privateFrontendIp=$x.privateFrontendIp;minCapacity=$x.minCapacity;maxCapacity=$x.maxCapacity;frontendPorts=@($x.frontendPorts);backendPools=@($x.backendPools);backendHttpSettings=@($x.backendHttpSettings);healthProbes=@($x.healthProbes);listeners=@($x.listeners);routingRules=@($x.routingRules);enableHttp2=$x.enableHttp2;tags=$x.tags} 'appgateway'
+          }
+
+      - name: Deploy Key Vaults, Storage, SQL, OpenAI and VMs
+        shell: pwsh
+        env:
+          VM_ADMIN_PASSWORD: \${{ secrets.VM_ADMIN_PASSWORD }}
+          SQL_ADMIN_PASSWORD: \${{ secrets.SQL_ADMIN_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $az = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
+          $cfg = Get-Content 'input.json' -Raw | ConvertFrom-Json
+          function Invoke-GroupBicep([string]$ResourceGroup,[string]$Template,[hashtable]$Values,[string]$Name,[hashtable]$SecureValues=@{}) {
+            $params = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($key in $Values.Keys) { $params.parameters[$key] = @{ value=$Values[$key] } }
+            $file = Join-Path $env:RUNNER_TEMP "$Name-params.json"
+            $params | ConvertTo-Json -Depth 100 | Set-Content $file
+            $secureArgs = @()
+            foreach ($key in $SecureValues.Keys) { $secureArgs += "$key=$($SecureValues[$key])" }
+            & $az deployment group what-if -g $ResourceGroup -f $Template --parameters "@$file" @secureArgs
+            if ($LASTEXITCODE -ne 0) { throw "What-If failed for $Template." }
+            & $az deployment group create -g $ResourceGroup -n "$Name-\${{ github.run_id }}" -f $Template --parameters "@$file" @secureArgs
+            if ($LASTEXITCODE -ne 0) { throw "Deployment failed for $Template." }
+          }
+          $tenant = & $az account show --query tenantId -o tsv
+          foreach ($x in @($cfg.landingZones.keyVaults)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/security/keyvault.bicep' @{keyVaultName=$x.name;location=$x.location;tenantId=$tenant;skuName=$x.skuName;skuFamily=$x.skuFamily;enableRbacAuthorization=$x.enableRbacAuthorization;enablePurgeProtection=$x.enablePurgeProtection;softDeleteRetentionInDays=$x.softDeleteRetentionInDays;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags} 'keyvault'
+          }
+          foreach ($x in @($cfg.landingZones.storageAccounts)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/storage/storageAccount.bicep' @{storageAccountName=$x.name;location=$x.location;tags=$x.tags;skuName=$x.skuName;kind=$x.kind;accessTier=$x.accessTier;minimumTlsVersion=$x.minimumTlsVersion;supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly;allowBlobPublicAccess=$x.allowBlobPublicAccess;allowSharedKeyAccess=$x.allowSharedKeyAccess;publicNetworkAccess=$x.publicNetworkAccess;containerNames=@($x.containerNames);blobServiceName=$x.blobServiceName;containerPublicAccess=$x.containerPublicAccess} 'storage'
+          }
+          foreach ($x in @($cfg.landingZones.sqlDatabases)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/database/sql.bicep' @{location=$x.location;serverName=$x.serverName;databaseName=$x.databaseName;administratorLogin=$x.administratorLogin;sqlServerVersion=$x.sqlServerVersion;databaseSkuName=$x.databaseSkuName;databaseSkuTier=$x.databaseSkuTier;databaseCapacity=$x.databaseCapacity;databaseMaxSizeBytes=$x.databaseMaxSizeBytes;publicNetworkAccess=$x.publicNetworkAccess;minimumTlsVersion=$x.minimumTlsVersion;tags=$x.tags} 'sql' @{administratorLoginPassword=$env:SQL_ADMIN_PASSWORD}
+          }
+          foreach ($x in @($cfg.landingZones.openAiServices)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/ai/openai.bicep' @{accountName=$x.name;location=$x.location;skuName=$x.skuName;customSubDomainName=$x.customSubDomainName;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags} 'openai'
+          }
+          foreach ($x in @($cfg.landingZones.vms)) {
+            Invoke-GroupBicep $x.resourceGroupName 'modules/compute/vm.bicep' @{location=$x.location;computerName=$x.computerName;vmName=$x.name;adminUsername=$x.adminUsername;vmSize=$x.vmSize;tags=$x.tags;vnetName=$x.vnetName;subnetName=$x.subnetName;nicName=$x.nicName;privateIpAllocationMethod=$x.privateIpAllocationMethod;imagePublisher=$x.imagePublisher;imageOffer=$x.imageOffer;imageSku=$x.imageSku;imageVersion=$x.imageVersion;osDiskStorageAccountType=$x.osDiskStorageAccountType;osDiskCreateOption=$x.osDiskCreateOption;osDiskSizeGB=$x.osDiskSizeGB;enableBootDiagnostics=$x.enableBootDiagnostics} 'vm' @{vmAdminPassword=$env:VM_ADMIN_PASSWORD}
+          }

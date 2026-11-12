@@ -1,16 +1,10 @@
-@description('Existing Virtual Network name')
 param vnetName string
-
-@description('Dedicated Application Gateway subnet name')
 param subnetName string
-
-@description('Application Gateway subnet CIDR')
 param subnetAddressPrefix string
 
 resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' existing = {
   name: vnetName
 }
-
 resource applicationGatewaySubnet 'Microsoft.Network/virtualNetworks/subnets@2023-09-01' = {
   parent: vnet
   name: subnetName
@@ -18,6 +12,4 @@ resource applicationGatewaySubnet 'Microsoft.Network/virtualNetworks/subnets@202
     addressPrefix: subnetAddressPrefix
   }
 }
-
 output subnetId string = applicationGatewaySubnet.id
-output subnetName string = applicationGatewaySubnet.name
