@@ -37,6 +37,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Bicep installation failed." }
           & $script:az bicep version
           if ($LASTEXITCODE -ne 0) { throw "Bicep is unavailable." }
+          # Make Azure CLI available to subsequent workflow steps as well.
+          $azDirectory = Split-Path -Parent $script:az
+          Add-Content -Path $env:GITHUB_PATH -Value $azDirectory
 
           $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
           if ($cfg.deployment.location -ne "EastUS") { throw "This workflow is configured for EastUS only." }
