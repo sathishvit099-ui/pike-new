@@ -230,7 +230,7 @@ jobs:
   deploy-load-balancer:
     name: Deploy Load Balancer
     runs-on: [self-hosted, X64, Windows]
-    needs: deploy-appgw
+    needs: deploy-subnet
     environment: dev
     steps:
       - uses: actions/checkout@v4
@@ -317,7 +317,7 @@ jobs:
   deploy-keyvault:
     name: Deploy Key Vaults
     runs-on: [self-hosted, X64, Windows]
-    needs: deploy-subnet
+    needs: deploy-appgw
     environment: dev
     steps:
       - uses: actions/checkout@v4
