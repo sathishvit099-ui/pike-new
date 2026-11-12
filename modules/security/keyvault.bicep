@@ -45,7 +45,7 @@ param publicNetworkAccess string
 param tags object
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: '${take(keyVaultName, 10)}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
+  name: '${substring(keyVaultName, 0, min(length(keyVaultName), 10))}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
   location: location
   tags: tags
   properties: {
