@@ -15,7 +15,6 @@
   "deployment": {
     "location": "EastUS"
   },
-  
   "landingZones": {
     "resourceGroups": [
       {
@@ -60,7 +59,7 @@
     "applicationGatewaySubnets": [
       {
         "vnetName": "vnet-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-centralus-001",
+        "resourceGroupName": "rg-pikehex-dev-EastUS-001",
         "subnetName": "snet-appgw-dev-001",
         "subnetAddressPrefix": "10.40.2.0/24"
       }
@@ -68,8 +67,8 @@
     "applicationGateways": [
       {
         "applicationGatewayName": "appgw-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-centralus-001",
-        "location": "centralus",
+        "resourceGroupName": "rg-pikehex-dev-EastUS-001",
+        "location": "EastUS",
         "vnetName": "vnet-pikehex-dev-001",
         "subnetName": "snet-appgw-dev-001",
         "publicIpName": "pip-appgw-pikehex-dev-001",
@@ -153,8 +152,8 @@
     "loadBalancers": [
       {
         "name": "lb-pikehex-dev-001",
-        "resourceGroupName": "rg-pikehex-dev-centralus-001",
-        "location": "centralus",
+        "resourceGroupName": "rg-pikehex-dev-EastUS-001",
+        "location": "EastUS",
         "skuName": "Standard",
         "skuTier": "Regional",
         "vnetName": "vnet-pikehex-dev-001",

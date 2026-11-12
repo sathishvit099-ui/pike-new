@@ -13,7 +13,7 @@ param subnetName string
 @description('Public IP resource name')
 param publicIpName string
 
-@description('Private frontend IP address')
+@description('Private frontend IP address within the dedicated gateway subnet')
 param privateFrontendIp string
 
 @description('Minimum autoscale capacity')
@@ -50,25 +50,21 @@ param enableHttp2 bool = true
 @description('Resource tags')
 param tags object = {}
 
-// Existing VNet
-resource vnet 'Microsoft.Network/virtualNetworks@2025-05-01' existing = {
+resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' existing = {
   name: vnetName
 }
 
-// Existing dedicated Application Gateway subnet
-resource subnet 'Microsoft.Network/virtualNetworks/subnets@2025-05-01' existing = {
+resource subnet 'Microsoft.Network/virtualNetworks/subnets@2023-09-01' existing = {
   parent: vnet
   name: subnetName
 }
 
-// Public frontend IP
-resource publicIp 'Microsoft.Network/publicIPAddresses@2025-05-01' = {
+resource publicIp 'Microsoft.Network/publicIPAddresses@2023-09-01' = {
   name: publicIpName
   location: location
   tags: tags
   sku: {
     name: 'Standard'
-    tier: 'Regional'
   }
   properties: {
     publicIPAllocationMethod: 'Static'
@@ -76,25 +72,20 @@ resource publicIp 'Microsoft.Network/publicIPAddresses@2025-05-01' = {
   }
 }
 
-// Application Gateway
-resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
+resource appGateway 'Microsoft.Network/applicationGateways@2023-09-01' = {
   name: applicationGatewayName
   location: location
   tags: tags
-
   properties: {
     sku: {
       name: 'Standard_v2'
       tier: 'Standard_v2'
     }
-
     autoscaleConfiguration: {
       minCapacity: minCapacity
       maxCapacity: maxCapacity
     }
-
     enableHttp2: enableHttp2
-
     gatewayIPConfigurations: [
       {
         name: 'gateway-ip-config'
@@ -105,7 +96,6 @@ resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
         }
       }
     ]
-
     frontendIPConfigurations: [
       {
         name: 'frontend-public'
@@ -126,7 +116,6 @@ resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
         }
       }
     ]
-
     frontendPorts: [
       for port in frontendPorts: {
         name: port.name
@@ -135,7 +124,6 @@ resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
         }
       }
     ]
-
     backendAddressPools: [
       for pool in backendPools: {
         name: pool.name
@@ -144,7 +132,6 @@ resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
         }
       }
     ]
-
     probes: [
       for probe in healthProbes: {
         name: probe.name
@@ -161,7 +148,6 @@ resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
         }
       }
     ]
-
     backendHttpSettingsCollection: [
       for setting in backendHttpSettings: {
         name: setting.name
@@ -171,39 +157,25 @@ resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
           requestTimeout: setting.requestTimeout
           cookieBasedAffinity: setting.cookieBasedAffinity
           probe: {
-            id: resourceId(
-              'Microsoft.Network/applicationGateways/probes',
-              applicationGatewayName,
-              setting.probeName
-            )
+            id: resourceId('Microsoft.Network/applicationGateways/probes', applicationGatewayName, setting.probeName)
           }
         }
       }
     ]
-
     httpListeners: [
       for listener in listeners: {
         name: listener.name
         properties: {
           frontendIPConfiguration: {
-            id: resourceId(
-              'Microsoft.Network/applicationGateways/frontendIPConfigurations',
-              applicationGatewayName,
-              listener.frontendIPConfigurationName
-            )
+            id: resourceId('Microsoft.Network/applicationGateways/frontendIPConfigurations', applicationGatewayName, listener.frontendIPConfigurationName)
           }
           frontendPort: {
-            id: resourceId(
-              'Microsoft.Network/applicationGateways/frontendPorts',
-              applicationGatewayName,
-              listener.frontendPortName
-            )
+            id: resourceId('Microsoft.Network/applicationGateways/frontendPorts', applicationGatewayName, listener.frontendPortName)
           }
           protocol: listener.protocol
         }
       }
     ]
-
     requestRoutingRules: [
       for rule in routingRules: {
         name: rule.name
@@ -211,25 +183,13 @@ resource appGateway 'Microsoft.Network/applicationGateways@2025-05-01' = {
           priority: rule.priority
           ruleType: 'Basic'
           httpListener: {
-            id: resourceId(
-              'Microsoft.Network/applicationGateways/httpListeners',
-              applicationGatewayName,
-              rule.listenerName
-            )
+            id: resourceId('Microsoft.Network/applicationGateways/httpListeners', applicationGatewayName, rule.listenerName)
           }
           backendAddressPool: {
-            id: resourceId(
-              'Microsoft.Network/applicationGateways/backendAddressPools',
-              applicationGatewayName,
-              rule.backendPoolName
-            )
+            id: resourceId('Microsoft.Network/applicationGateways/backendAddressPools', applicationGatewayName, rule.backendPoolName)
           }
           backendHttpSettings: {
-            id: resourceId(
-              'Microsoft.Network/applicationGateways/backendHttpSettingsCollection',
-              applicationGatewayName,
-              rule.httpSettingName
-            )
+            id: resourceId('Microsoft.Network/applicationGateways/backendHttpSettingsCollection', applicationGatewayName, rule.httpSettingName)
           }
         }
       }

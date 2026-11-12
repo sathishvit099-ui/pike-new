@@ -7,11 +7,11 @@ param subnetName string
 @description('Application Gateway subnet CIDR')
 param subnetAddressPrefix string
 
-resource vnet 'Microsoft.Network/virtualNetworks@2025-05-01' existing = {
+resource vnet 'Microsoft.Network/virtualNetworks@2023-09-01' existing = {
   name: vnetName
 }
 
-resource applicationGatewaySubnet 'Microsoft.Network/virtualNetworks/subnets@2025-05-01' = {
+resource applicationGatewaySubnet 'Microsoft.Network/virtualNetworks/subnets@2023-09-01' = {
   parent: vnet
   name: subnetName
   properties: {
