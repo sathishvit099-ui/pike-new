@@ -329,7 +329,7 @@ jobs:
       - name: What-If and deploy Key Vaults
         shell: pwsh
         env:
-          DEPLOYMENT_SUFFIX: ${{ github.run_id }}
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json; $tenant=& $az account show --query tenantId -o tsv
           foreach($x in @($cfg.landingZones.keyVaults)){
@@ -403,7 +403,7 @@ jobs:
       - name: What-If and deploy Azure OpenAI
         shell: pwsh
         env:
-          DEPLOYMENT_SUFFIX: ${{ github.run_id }}
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json
           Write-Host "Configured Azure OpenAI names: $((@($cfg.landingZones.openAiServices) | ForEach-Object { $_.name }) -join ', ')"
