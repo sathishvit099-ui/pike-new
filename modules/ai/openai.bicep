@@ -23,7 +23,7 @@ param publicNetworkAccess string
 @description('Resource tags.')
 param tags object
 
-var uniqueAccountName = '${take(accountName, 20)}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
+var uniqueAccountName = '${substring(accountName, 0, min(length(accountName), 20))}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
 
 resource openAiService 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   name: uniqueAccountName
