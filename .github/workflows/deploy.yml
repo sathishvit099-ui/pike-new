@@ -61,7 +61,7 @@ jobs:
           if (-not $cfg.landingZones.resourceGroups -or @($cfg.landingZones.resourceGroups).Count -eq 0) {
             throw "No resource groups found in input.json."
           }
-          foreach ($name in @("vnets","subnets","nsgs","routeTables","vms","keyVaults","storageAccounts","sqlDatabases","openAiServices")) {
+          foreach ($name in @("vnets","subnets","applicationGatewaySubnets","loadBalancers","applicationGateways","nsgs","routeTables","vms","keyVaults","storageAccounts","sqlDatabases","openAiServices")) {
             if ($null -eq $cfg.landingZones.$name) { throw "landingZones.$name is missing from input.json." }
           }
 
@@ -227,8 +227,8 @@ jobs:
             & $az deployment group create -g $x.resourceGroupName -n "pike-subnet-${{ github.run_id }}" -f "modules/networking/subnet.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Subnet deployment failed"}
           }
 
-  deploy-keyvault:
-    name: Deploy Key Vaults
+  deploy-load-balancer:
+    name: Deploy Load Balancer
     runs-on: [self-hosted, X64, Windows]
     needs: deploy-subnet
     environment: dev
@@ -239,12 +239,101 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: What-If and deploy Load Balancers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          foreach ($x in @($cfg.landingZones.loadBalancers)) {
+            $v = @{ loadBalancerName=$x.name; location=$x.location; skuName=$x.skuName; skuTier=$x.skuTier; tags=$x.tags; vnetName=$x.vnetName; subnetName=$x.subnetName; frontends=@($x.frontends); backendPools=@($x.backendPools); probes=@($x.probes); loadBalancingRules=@($x.loadBalancingRules) }
+            $p = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($k in $v.Keys) { $p.parameters[$k]=@{value=$v[$k]} }
+            $f="$env:RUNNER_TEMP\lb.json"; $p | ConvertTo-Json -Depth 100 | Set-Content $f
+            & $az deployment group what-if -g $x.resourceGroupName -f "modules/loadbalancer/lb.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Load Balancer What-If failed: $($x.name)" }
+            & $az deployment group create -g $x.resourceGroupName -n "pike-lb-${{ github.run_id }}" -f "modules/loadbalancer/lb.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Load Balancer deployment failed: $($x.name)" }
+          }
+
+  deploy-appgw-subnet:
+    name: Deploy Application Gateway Subnet
+    runs-on: [self-hosted, X64, Windows]
+    needs: deploy-subnet
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: What-If and deploy Application Gateway Subnets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          foreach ($x in @($cfg.landingZones.applicationGatewaySubnets)) {
+            $v = @{ vnetName=$x.vnetName; subnetName=$x.subnetName; subnetAddressPrefix=$x.subnetAddressPrefix }
+            $p = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($k in $v.Keys) { $p.parameters[$k]=@{value=$v[$k]} }
+            $f="$env:RUNNER_TEMP\appgw-subnet.json"; $p | ConvertTo-Json -Depth 100 | Set-Content $f
+            & $az deployment group what-if -g $x.resourceGroupName -f "modules/networking/applicationGatewaySubnet.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway subnet What-If failed: $($x.subnetName)" }
+            & $az deployment group create -g $x.resourceGroupName -n "pike-appgw-subnet-${{ github.run_id }}" -f "modules/networking/applicationGatewaySubnet.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway subnet deployment failed: $($x.subnetName)" }
+          }
+
+  deploy-appgw:
+    name: Deploy Application Gateway
+    runs-on: [self-hosted, X64, Windows]
+    needs: [deploy-load-balancer, deploy-appgw-subnet]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: What-If and deploy Application Gateways
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          foreach ($x in @($cfg.landingZones.applicationGateways)) {
+            $v = @{ applicationGatewayName=$x.applicationGatewayName; location=$x.location; vnetName=$x.vnetName; subnetName=$x.subnetName; publicIpName=$x.publicIpName; privateFrontendIp=$x.privateFrontendIp; minCapacity=$x.minCapacity; maxCapacity=$x.maxCapacity; frontendPorts=@($x.frontendPorts); backendPools=@($x.backendPools); backendHttpSettings=@($x.backendHttpSettings); healthProbes=@($x.healthProbes); listeners=@($x.listeners); routingRules=@($x.routingRules); enableHttp2=$x.enableHttp2; tags=$x.tags }
+            $p = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($k in $v.Keys) { $p.parameters[$k]=@{value=$v[$k]} }
+            $f="$env:RUNNER_TEMP\appgw.json"; $p | ConvertTo-Json -Depth 100 | Set-Content $f
+            & $az deployment group what-if -g $x.resourceGroupName -f "modules/networking/applicationGateway.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway What-If failed: $($x.applicationGatewayName)" }
+            & $az deployment group create -g $x.resourceGroupName -n "pike-appgw-${{ github.run_id }}" -f "modules/networking/applicationGateway.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway deployment failed: $($x.applicationGatewayName)" }
+          }
+
+  deploy-keyvault:
+    name: Deploy Key Vaults
+    runs-on: [self-hosted, X64, Windows]
+    needs: deploy-appgw
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Key Vaults
         shell: pwsh
+        env:
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json; $tenant=& $az account show --query tenantId -o tsv
           foreach($x in @($cfg.landingZones.keyVaults)){
-            $v=@{keyVaultName=$x.name;location=$x.location;tenantId=$tenant;skuName=$x.skuName;skuFamily=$x.skuFamily;enableRbacAuthorization=$x.enableRbacAuthorization;enablePurgeProtection=$x.enablePurgeProtection;softDeleteRetentionInDays=$x.softDeleteRetentionInDays;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            $v=@{keyVaultName=$x.name;deploymentSuffix=$env:DEPLOYMENT_SUFFIX;location=$x.location;tenantId=$tenant;skuName=$x.skuName;skuFamily=$x.skuFamily;enableRbacAuthorization=$x.enableRbacAuthorization;enablePurgeProtection=$x.enablePurgeProtection;softDeleteRetentionInDays=$x.softDeleteRetentionInDays;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
             foreach($k in $v.Keys){$p.parameters[$k]=@{value=$v[$k]}}; $f="$env:RUNNER_TEMP\kv.json"; $p|ConvertTo-Json -Depth 100|Set-Content $f
             & $az deployment group what-if -g $x.resourceGroupName -f "modules/security/keyvault.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Key Vault What-If failed"}
             & $az deployment group create -g $x.resourceGroupName -n "pike-kv-${{ github.run_id }}" -f "modules/security/keyvault.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Key Vault deployment failed"}
@@ -313,11 +402,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Azure OpenAI
         shell: pwsh
+        env:
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json
           Write-Host "Configured Azure OpenAI names: $((@($cfg.landingZones.openAiServices) | ForEach-Object { $_.name }) -join ', ')"
           foreach($x in @($cfg.landingZones.openAiServices)){
-            $v=@{accountName=$x.name;location=$x.location;skuName=$x.skuName;customSubDomainName=$x.customSubDomainName;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            $v=@{accountName=$x.name;deploymentSuffix=$env:DEPLOYMENT_SUFFIX;location=$x.location;skuName=$x.skuName;customSubDomainName=$x.customSubDomainName;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
             foreach($k in $v.Keys){$p.parameters[$k]=@{value=$v[$k]}}; $f="$env:RUNNER_TEMP\openai.json"; $p|ConvertTo-Json -Depth 100|Set-Content $f
             & $az deployment group what-if -g $x.resourceGroupName -f "modules/ai/openai.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "OpenAI What-If failed"}
             & $az deployment group create -g $x.resourceGroupName -n "pike-openai-${{ github.run_id }}" -f "modules/ai/openai.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "OpenAI deployment failed"}
