@@ -19,15 +19,15 @@ jobs:
       - name: Azure login using OIDC
         uses: azure/login@v2
         with:
-          client-id: \${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: \${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: \${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Validate configuration and compile Bicep
         shell: pwsh
         env:
-          VM_ADMIN_PASSWORD: \${{ secrets.VM_ADMIN_PASSWORD }}
-          SQL_ADMIN_PASSWORD: \${{ secrets.SQL_ADMIN_PASSWORD }}
+          VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           $az = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
@@ -59,7 +59,7 @@ jobs:
             $f = "$env:RUNNER_TEMP\rg-params.json"; $p | Set-Content $f
             & $az deployment sub what-if --location $x.location --template-file 'modules/RG/resourcegroup.bicep' --parameters "@$f"
             if ($LASTEXITCODE -ne 0) { throw "Resource group What-If failed: $($x.rgName)" }
-            & $az deployment sub create --name "pike-rg-\${{ github.run_id }}" --location $x.location --template-file 'modules/RG/resourcegroup.bicep' --parameters "@$f"
+            & $az deployment sub create --name "pike-rg-${{ github.run_id }}" --location $x.location --template-file 'modules/RG/resourcegroup.bicep' --parameters "@$f"
             if ($LASTEXITCODE -ne 0) { throw "Resource group deployment failed: $($x.rgName)" }
           }
 
@@ -76,7 +76,7 @@ jobs:
             $params | ConvertTo-Json -Depth 100 | Set-Content $file
             & $az deployment group what-if -g $ResourceGroup -f $Template --parameters "@$file"
             if ($LASTEXITCODE -ne 0) { throw "What-If failed for $Template in $ResourceGroup." }
-            & $az deployment group create -g $ResourceGroup -n "$Name-\${{ github.run_id }}" -f $Template --parameters "@$file"
+            & $az deployment group create -g $ResourceGroup -n "$Name-${{ github.run_id }}" -f $Template --parameters "@$file"
             if ($LASTEXITCODE -ne 0) { throw "Deployment failed for $Template in $ResourceGroup." }
           }
           foreach ($x in @($cfg.landingZones.nsgs)) {
@@ -106,8 +106,8 @@ jobs:
       - name: Deploy Key Vaults, Storage, SQL, OpenAI and VMs
         shell: pwsh
         env:
-          VM_ADMIN_PASSWORD: \${{ secrets.VM_ADMIN_PASSWORD }}
-          SQL_ADMIN_PASSWORD: \${{ secrets.SQL_ADMIN_PASSWORD }}
+          VM_ADMIN_PASSWORD: ${{ secrets.VM_ADMIN_PASSWORD }}
+          SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
         run: |
           $ErrorActionPreference = 'Stop'
           $az = 'C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd'
@@ -121,7 +121,7 @@ jobs:
             foreach ($key in $SecureValues.Keys) { $secureArgs += "$key=$($SecureValues[$key])" }
             & $az deployment group what-if -g $ResourceGroup -f $Template --parameters "@$file" @secureArgs
             if ($LASTEXITCODE -ne 0) { throw "What-If failed for $Template." }
-            & $az deployment group create -g $ResourceGroup -n "$Name-\${{ github.run_id }}" -f $Template --parameters "@$file" @secureArgs
+            & $az deployment group create -g $ResourceGroup -n "$Name-${{ github.run_id }}" -f $Template --parameters "@$file" @secureArgs
             if ($LASTEXITCODE -ne 0) { throw "Deployment failed for $Template." }
           }
           $tenant = & $az account show --query tenantId -o tsv
