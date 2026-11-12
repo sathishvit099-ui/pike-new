@@ -1,6 +1,9 @@
 @description('Key Vault name.')
 param keyVaultName string
 
+@description('Unique deployment suffix from GitHub Actions run ID and attempt.')
+param deploymentSuffix string
+
 @description('Azure region.')
 param location string
 
@@ -42,7 +45,7 @@ param publicNetworkAccess string
 param tags object
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: keyVaultName
+  name: '${take(keyVaultName, 10)}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
   location: location
   tags: tags
   properties: {
