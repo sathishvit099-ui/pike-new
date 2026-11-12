@@ -24,6 +24,7 @@ param publicNetworkAccess string
 param tags object
 
 var uniqueAccountName = '${substring(accountName, 0, min(length(accountName), 20))}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
+var uniqueCustomSubDomainName = '${substring(customSubDomainName, 0, min(length(customSubDomainName), 20))}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix, 'subdomain')}'
 
 resource openAiService 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   name: uniqueAccountName
@@ -33,7 +34,7 @@ resource openAiService 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
     name: skuName
   }
   properties: {
-    customSubDomainName: uniqueAccountName
+    customSubDomainName: uniqueCustomSubDomainName
     publicNetworkAccess: publicNetworkAccess
   }
   tags: tags
