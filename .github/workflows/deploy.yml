@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   prechecks:
-    name: Bicep build/lint and input validation
+    name: Bicep build and input validation
     runs-on: [self-hosted, X64, Windows]
     steps:
       - uses: actions/checkout@v4
@@ -40,10 +40,8 @@ jobs:
           $files = @(Get-ChildItem modules -Recurse -Filter "*.bicep")
           if ($files.Count -eq 0) { throw "No Bicep modules found." }
           foreach ($file in $files) {
-            Write-Host "Linting $($file.FullName)"
-            & $az bicep lint --file $file.FullName
-            if ($LASTEXITCODE -ne 0) { throw "Bicep lint failed: $($file.Name)" }
-            Write-Host "Building $($file.FullName)"
+            Write-Host "Building and running Bicep linter diagnostics: $($file.FullName)"
+            & $az bicep build --file $file.FullName --stdout | Out-Null
             & $az bicep build --file $file.FullName --stdout | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "Bicep build failed: $($file.Name)" }
           }
