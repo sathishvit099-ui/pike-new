@@ -2,6 +2,9 @@
 @description('Storage account name; globally unique, lowercase, 3-24 characters.')
 param storageAccountName string
 
+@description('Unique deployment suffix from GitHub Actions run ID and attempt.')
+param deploymentSuffix string
+
 @description('Azure region.')
 param location string
 
@@ -50,8 +53,10 @@ param blobServiceName string
 ])
 param containerPublicAccess string
 
+var uniqueStorageAccountName = '${substring(storageAccountName, 0, min(length(storageAccountName), 11))}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: storageAccountName
+  name: uniqueStorageAccountName
   location: location
   tags: tags
   sku: {
