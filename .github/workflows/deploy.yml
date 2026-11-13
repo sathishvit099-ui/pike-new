@@ -353,11 +353,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Storage Accounts
         shell: pwsh
+        env:
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json
           Write-Host "Configured Storage Account names: $((@($cfg.landingZones.storageAccounts) | ForEach-Object { $_.name }) -join ', ')"
           foreach($x in @($cfg.landingZones.storageAccounts)){
-            $v=@{storageAccountName=$x.name;location=$x.location;tags=$x.tags;skuName=$x.skuName;kind=$x.kind;accessTier=$x.accessTier;minimumTlsVersion=$x.minimumTlsVersion;supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly;allowBlobPublicAccess=$x.allowBlobPublicAccess;allowSharedKeyAccess=$x.allowSharedKeyAccess;publicNetworkAccess=$x.publicNetworkAccess;containerNames=@($x.containerNames);blobServiceName=$x.blobServiceName;containerPublicAccess=$x.containerPublicAccess}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            $v=@{storageAccountName=$x.name;deploymentSuffix=$env:DEPLOYMENT_SUFFIX;location=$x.location;tags=$x.tags;skuName=$x.skuName;kind=$x.kind;accessTier=$x.accessTier;minimumTlsVersion=$x.minimumTlsVersion;supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly;allowBlobPublicAccess=$x.allowBlobPublicAccess;allowSharedKeyAccess=$x.allowSharedKeyAccess;publicNetworkAccess=$x.publicNetworkAccess;containerNames=@($x.containerNames);blobServiceName=$x.blobServiceName;containerPublicAccess=$x.containerPublicAccess}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
             foreach($k in $v.Keys){$p.parameters[$k]=@{value=$v[$k]}}; $f="$env:RUNNER_TEMP\storage.json"; $p|ConvertTo-Json -Depth 100|Set-Content $f
             & $az deployment group what-if -g $x.resourceGroupName -f "modules/storage/storageAccount.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Storage What-If failed"}
             & $az deployment group create -g $x.resourceGroupName -n "pike-storage-${{ github.run_id }}" -f "modules/storage/storageAccount.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Storage deployment failed"}
