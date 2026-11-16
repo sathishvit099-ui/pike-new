@@ -1045,7 +1045,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
           $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
-          $template = "modules/database/postgresql.bicep"
+          $template = "modules/database/postgresql/postgresql.bicep"
 
           if (-not (Test-Path -LiteralPath $template)) {
             Write-Warning "PostgreSQL Bicep module is missing. Skipping PostgreSQL deployment."
