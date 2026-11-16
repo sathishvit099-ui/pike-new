@@ -72,29 +72,29 @@
     ],
     "vms": [
       {
-        "name": "vm-pikehex-dev-031126",
-        "computerName": "pikevm031126",
-        "resourceGroupName": "rg-pikehex-dev-eastus-001",
-        "location": "eastus",
+        "name": "vm-pikehex-sql-dev-001",
+        "computerName": "pikesqldev001",
+        "resourceGroupName": "rg-pikehex-dev-EastUS-001",
+        "location": "EastUS",
         "adminUsername": "azureadmin",
-        "vmSize": "Standard_B2ms",
+        "vmSize": "Standard_D2as_v5",
+        "tags": {
+          "Environment": "dev",
+          "Workload": "pikehex-vm-sql",
+          "ManagedBy": "Bicep"
+        },
         "vnetName": "vnet-pikehex-dev-001",
         "subnetName": "snet-app-dev-001",
-        "nicName": "nic-pikehex-dev-031126",
+        "nicName": "nic-pikehex-sql-dev-001",
         "privateIpAllocationMethod": "Dynamic",
-        "imagePublisher": "MicrosoftWindowsServer",
-        "imageOffer": "WindowsServer",
-        "imageSku": "2022-datacenter-azure-edition",
+        "imagePublisher": "MicrosoftSQLServer",
+        "imageOffer": "SQL2022-WS2022",
+        "imageSku": "sqldev-gen2",
         "imageVersion": "latest",
         "osDiskStorageAccountType": "StandardSSD_LRS",
         "osDiskCreateOption": "FromImage",
         "osDiskSizeGB": 128,
-        "enableBootDiagnostics": true,
-        "tags": {
-          "Environment": "dev",
-          "Workload": "pikehex-cloud-migration",
-          "ManagedBy": "Bicep"
-        }
+        "enableBootDiagnostics": true
       }
     ],
     "keyVaults": [
@@ -174,6 +174,162 @@
           "Workload": "pikehex-cloud-migration",
           "ManagedBy": "Bicep"
         }
+      }
+    ],
+
+    "applicationGatewaySubnets": [
+      {
+        "vnetName": "vnet-pikehex-dev-001",
+        "resourceGroupName": "rg-pikehex-dev-eastus-001",
+        "subnetName": "snet-appgw-dev-001",
+        "subnetAddressPrefix": "10.40.2.0/24"
+      }
+    ],
+    "loadBalancers": [
+      {
+        "name": "lb-pikehex-dev-001",
+        "resourceGroupName": "rg-pikehex-dev-eastus-001",
+        "location": "eastus",
+        "skuName": "Standard",
+        "skuTier": "Regional",
+        "vnetName": "vnet-pikehex-dev-001",
+        "subnetName": "snet-app-dev-001",
+        "frontends": [
+          {
+            "name": "frontend-private-001",
+            "privateIp": "10.40.1.10"
+          }
+        ],
+        "backendPools": [
+          {
+            "name": "backend-pool-001",
+            "addresses": []
+          }
+        ],
+        "probes": [
+          {
+            "name": "probe-tcp-80",
+            "protocol": "Tcp",
+            "port": 80,
+            "intervalInSeconds": 15,
+            "numberOfProbes": 2
+          }
+        ],
+        "loadBalancingRules": [
+          {
+            "name": "rule-tcp-80",
+            "frontendName": "frontend-private-001",
+            "backendPoolName": "backend-pool-001",
+            "probeName": "probe-tcp-80",
+            "protocol": "Tcp",
+            "frontendPort": 80,
+            "backendPort": 80,
+            "idleTimeoutInMinutes": 4,
+            "enableFloatingIp": false,
+            "enableTcpReset": true
+          }
+        ],
+        "tags": {
+          "Environment": "dev",
+          "Workload": "pikehex-cloud-migration",
+          "ManagedBy": "Bicep"
+        }
+      }
+    ],
+    "applicationGateways": [
+      {
+        "applicationGatewayName": "appgw-pikehex-dev-001",
+        "resourceGroupName": "rg-pikehex-dev-eastus-001",
+        "location": "eastus",
+        "vnetName": "vnet-pikehex-dev-001",
+        "subnetName": "snet-appgw-dev-001",
+        "publicIpName": "pip-appgw-pikehex-dev-001",
+        "privateFrontendIp": "10.40.2.10",
+        "minCapacity": 2,
+        "maxCapacity": 5,
+        "enableHttp2": true,
+        "frontendPorts": [
+          {
+            "name": "port-http-80",
+            "port": 80
+          }
+        ],
+        "backendPools": [
+          {
+            "name": "backend-pool-001",
+            "backendAddresses": []
+          }
+        ],
+        "healthProbes": [
+          {
+            "name": "probe-http",
+            "protocol": "Http",
+            "host": "127.0.0.1",
+            "path": "/health",
+            "interval": 30,
+            "timeout": 30,
+            "unhealthyThreshold": 3,
+            "statusCodes": [
+              "200-399"
+            ]
+          }
+        ],
+        "backendHttpSettings": [
+          {
+            "name": "http-settings-80",
+            "port": 80,
+            "protocol": "Http",
+            "requestTimeout": 30,
+            "cookieBasedAffinity": "Disabled",
+            "probeName": "probe-http"
+          }
+        ],
+        "listeners": [
+          {
+            "name": "listener-public-http",
+            "frontendIPConfigurationName": "frontend-public",
+            "frontendPortName": "port-http-80",
+            "protocol": "Http"
+          },
+          {
+            "name": "listener-private-http",
+            "frontendIPConfigurationName": "frontend-private",
+            "frontendPortName": "port-http-80",
+            "protocol": "Http"
+          }
+        ],
+        "routingRules": [
+          {
+            "name": "rule-public-http",
+            "priority": 100,
+            "listenerName": "listener-public-http",
+            "backendPoolName": "backend-pool-001",
+            "httpSettingName": "http-settings-80"
+          },
+          {
+            "name": "rule-private-http",
+            "priority": 101,
+            "listenerName": "listener-private-http",
+            "backendPoolName": "backend-pool-001",
+            "httpSettingName": "http-settings-80"
+          }
+        ],
+        "tags": {
+          "Environment": "dev",
+          "Workload": "pikehex-cloud-migration",
+          "ManagedBy": "Bicep"
+        }
+      }
+    ]
+  },
+  "rbac": {
+    "resourceGroupAccess": [
+      {
+        "resourceGroupName": "rg-pikehex-dev-EastUS-001",
+        "principalEmail": "SKumarMunis-Hex-adm@pike.com",
+        "principalType": "User",
+        "roleDefinitionName": "Reader",
+        "roleDefinitionGuid": "acdd72a7-3385-48ef-bd42-f606fba81ae7"
       }
     ]
   }

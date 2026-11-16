@@ -10,9 +10,22 @@ permissions:
 jobs:
   prechecks:
     name: Bicep lint and input validation
-    runs-on: [self-hosted, X64, Windows]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install or update Azure CLI from Microsoft
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          az version
+      - name: Install or update Bicep CLI from Microsoft
+        shell: bash
+        run: |
+          set -euo pipefail
+          az bicep install
+          az bicep upgrade
+          az bicep version
       - name: Check Azure CLI, Bicep and required secrets
         shell: pwsh
         env:
@@ -20,25 +33,6 @@ jobs:
           SQL_ADMIN_PASSWORD: ${{ secrets.SQL_ADMIN_PASSWORD }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
-          if (-not (Test-Path $az)) { throw "Azure CLI not found at $az" }
-          & $az version
-          if ($LASTEXITCODE -ne 0) { throw "Azure CLI check failed." }
-          & $az bicep install
-          if ($LASTEXITCODE -ne 0) { throw "Bicep installation failed." }
-          # Upgrade Bicep
-          & $az bicep upgrade
-          if ($LASTEXITCODE -ne 0) { throw "Bicep upgrade failed." }
-          & $az bicep version
-          if ([string]::IsNullOrWhiteSpace($env:VM_ADMIN_PASSWORD)) { throw "VM_ADMIN_PASSWORD secret is missing." }
-          if ([string]::IsNullOrWhiteSpace($env:SQL_ADMIN_PASSWORD)) { throw "SQL_ADMIN_PASSWORD secret is missing." }
-          if ([string]::IsNullOrWhiteSpace($env:AZURE_SUBSCRIPTION_ID)) { throw "AZURE_SUBSCRIPTION_ID secret is missing or unavailable." }
-          if ($env:AZURE_SUBSCRIPTION_ID -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { throw "AZURE_SUBSCRIPTION_ID is not a valid GUID." }
-          Write-Host "Subscription ID secret is available and has valid GUID format; value will not be printed."
-          # if (-not (Test-Path "bicepconfig.json")) { throw "bicepconfig.json not found." }
-          $files = @(Get-ChildItem modules -Recurse -Filter "*.bicep")
-          if ($files.Count -eq 0) { throw "No Bicep modules found." }
           foreach ($file in $files) {
             Write-Host "Building $($file.FullName)"
             & $az bicep build --file $file.FullName --stdout | Out-Null
@@ -61,7 +55,7 @@ jobs:
           if (-not $cfg.landingZones.resourceGroups -or @($cfg.landingZones.resourceGroups).Count -eq 0) {
             throw "No resource groups found in input.json."
           }
-          foreach ($name in @("vnets","subnets","nsgs","routeTables","vms","keyVaults","storageAccounts","sqlDatabases","openAiServices")) {
+          foreach ($name in @("vnets","subnets","applicationGatewaySubnets","loadBalancers","applicationGateways","nsgs","routeTables","vms","keyVaults","storageAccounts","sqlDatabases","openAiServices")) {
             if ($null -eq $cfg.landingZones.$name) { throw "landingZones.$name is missing from input.json." }
           }
 
@@ -227,8 +221,8 @@ jobs:
             & $az deployment group create -g $x.resourceGroupName -n "pike-subnet-${{ github.run_id }}" -f "modules/networking/subnet.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Subnet deployment failed"}
           }
 
-  deploy-keyvault:
-    name: Deploy Key Vaults
+  deploy-load-balancer:
+    name: Deploy Load Balancer
     runs-on: [self-hosted, X64, Windows]
     needs: deploy-subnet
     environment: dev
@@ -239,12 +233,101 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: What-If and deploy Load Balancers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          foreach ($x in @($cfg.landingZones.loadBalancers)) {
+            $v = @{ loadBalancerName=$x.name; location=$x.location; skuName=$x.skuName; skuTier=$x.skuTier; tags=$x.tags; vnetName=$x.vnetName; subnetName=$x.subnetName; frontends=@($x.frontends); backendPools=@($x.backendPools); probes=@($x.probes); loadBalancingRules=@($x.loadBalancingRules) }
+            $p = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($k in $v.Keys) { $p.parameters[$k]=@{value=$v[$k]} }
+            $f="$env:RUNNER_TEMP\lb.json"; $p | ConvertTo-Json -Depth 100 | Set-Content $f
+            & $az deployment group what-if -g $x.resourceGroupName -f "modules/loadbalancer/lb.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Load Balancer What-If failed: $($x.name)" }
+            & $az deployment group create -g $x.resourceGroupName -n "pike-lb-${{ github.run_id }}" -f "modules/loadbalancer/lb.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Load Balancer deployment failed: $($x.name)" }
+          }
+
+  deploy-appgw-subnet:
+    name: Deploy Application Gateway Subnet
+    runs-on: [self-hosted, X64, Windows]
+    needs: deploy-subnet
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: What-If and deploy Application Gateway Subnets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          foreach ($x in @($cfg.landingZones.applicationGatewaySubnets)) {
+            $v = @{ vnetName=$x.vnetName; subnetName=$x.subnetName; subnetAddressPrefix=$x.subnetAddressPrefix }
+            $p = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($k in $v.Keys) { $p.parameters[$k]=@{value=$v[$k]} }
+            $f="$env:RUNNER_TEMP\appgw-subnet.json"; $p | ConvertTo-Json -Depth 100 | Set-Content $f
+            & $az deployment group what-if -g $x.resourceGroupName -f "modules/networking/applicationGatewaySubnet.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway subnet What-If failed: $($x.subnetName)" }
+            & $az deployment group create -g $x.resourceGroupName -n "pike-appgw-subnet-${{ github.run_id }}" -f "modules/networking/applicationGatewaySubnet.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway subnet deployment failed: $($x.subnetName)" }
+          }
+
+  deploy-appgw:
+    name: Deploy Application Gateway
+    runs-on: [self-hosted, X64, Windows]
+    needs: [deploy-load-balancer, deploy-appgw-subnet]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: What-If and deploy Application Gateways
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          foreach ($x in @($cfg.landingZones.applicationGateways)) {
+            $v = @{ applicationGatewayName=$x.applicationGatewayName; location=$x.location; vnetName=$x.vnetName; subnetName=$x.subnetName; publicIpName=$x.publicIpName; privateFrontendIp=$x.privateFrontendIp; minCapacity=$x.minCapacity; maxCapacity=$x.maxCapacity; frontendPorts=@($x.frontendPorts); backendPools=@($x.backendPools); backendHttpSettings=@($x.backendHttpSettings); healthProbes=@($x.healthProbes); listeners=@($x.listeners); routingRules=@($x.routingRules); enableHttp2=$x.enableHttp2; tags=$x.tags }
+            $p = @{ '$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion='1.0.0.0'; parameters=@{} }
+            foreach ($k in $v.Keys) { $p.parameters[$k]=@{value=$v[$k]} }
+            $f="$env:RUNNER_TEMP\appgw.json"; $p | ConvertTo-Json -Depth 100 | Set-Content $f
+            & $az deployment group what-if -g $x.resourceGroupName -f "modules/networking/applicationGateway.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway What-If failed: $($x.applicationGatewayName)" }
+            & $az deployment group create -g $x.resourceGroupName -n "pike-appgw-${{ github.run_id }}" -f "modules/networking/applicationGateway.bicep" --parameters "@$f"
+            if ($LASTEXITCODE -ne 0) { throw "Application Gateway deployment failed: $($x.applicationGatewayName)" }
+          }
+
+  deploy-keyvault:
+    name: Deploy Key Vaults
+    runs-on: [self-hosted, X64, Windows]
+    needs: deploy-appgw
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Key Vaults
         shell: pwsh
+        env:
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json; $tenant=& $az account show --query tenantId -o tsv
           foreach($x in @($cfg.landingZones.keyVaults)){
-            $v=@{keyVaultName=$x.name;location=$x.location;tenantId=$tenant;skuName=$x.skuName;skuFamily=$x.skuFamily;enableRbacAuthorization=$x.enableRbacAuthorization;enablePurgeProtection=$x.enablePurgeProtection;softDeleteRetentionInDays=$x.softDeleteRetentionInDays;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            $v=@{keyVaultName=$x.name;deploymentSuffix=$env:DEPLOYMENT_SUFFIX;location=$x.location;tenantId=$tenant;skuName=$x.skuName;skuFamily=$x.skuFamily;enableRbacAuthorization=$x.enableRbacAuthorization;enablePurgeProtection=$x.enablePurgeProtection;softDeleteRetentionInDays=$x.softDeleteRetentionInDays;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
             foreach($k in $v.Keys){$p.parameters[$k]=@{value=$v[$k]}}; $f="$env:RUNNER_TEMP\kv.json"; $p|ConvertTo-Json -Depth 100|Set-Content $f
             & $az deployment group what-if -g $x.resourceGroupName -f "modules/security/keyvault.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Key Vault What-If failed"}
             & $az deployment group create -g $x.resourceGroupName -n "pike-kv-${{ github.run_id }}" -f "modules/security/keyvault.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Key Vault deployment failed"}
@@ -264,11 +347,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Storage Accounts
         shell: pwsh
+        env:
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json
           Write-Host "Configured Storage Account names: $((@($cfg.landingZones.storageAccounts) | ForEach-Object { $_.name }) -join ', ')"
           foreach($x in @($cfg.landingZones.storageAccounts)){
-            $v=@{storageAccountName=$x.name;location=$x.location;tags=$x.tags;skuName=$x.skuName;kind=$x.kind;accessTier=$x.accessTier;minimumTlsVersion=$x.minimumTlsVersion;supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly;allowBlobPublicAccess=$x.allowBlobPublicAccess;allowSharedKeyAccess=$x.allowSharedKeyAccess;publicNetworkAccess=$x.publicNetworkAccess;containerNames=@($x.containerNames);blobServiceName=$x.blobServiceName;containerPublicAccess=$x.containerPublicAccess}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            $v=@{storageAccountName=$x.name;deploymentSuffix=$env:DEPLOYMENT_SUFFIX;location=$x.location;tags=$x.tags;skuName=$x.skuName;kind=$x.kind;accessTier=$x.accessTier;minimumTlsVersion=$x.minimumTlsVersion;supportsHttpsTrafficOnly=$x.supportsHttpsTrafficOnly;allowBlobPublicAccess=$x.allowBlobPublicAccess;allowSharedKeyAccess=$x.allowSharedKeyAccess;publicNetworkAccess=$x.publicNetworkAccess;containerNames=@($x.containerNames);blobServiceName=$x.blobServiceName;containerPublicAccess=$x.containerPublicAccess}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
             foreach($k in $v.Keys){$p.parameters[$k]=@{value=$v[$k]}}; $f="$env:RUNNER_TEMP\storage.json"; $p|ConvertTo-Json -Depth 100|Set-Content $f
             & $az deployment group what-if -g $x.resourceGroupName -f "modules/storage/storageAccount.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Storage What-If failed"}
             & $az deployment group create -g $x.resourceGroupName -n "pike-storage-${{ github.run_id }}" -f "modules/storage/storageAccount.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "Storage deployment failed"}
@@ -313,11 +398,13 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: What-If and deploy Azure OpenAI
         shell: pwsh
+        env:
+          DEPLOYMENT_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           $ErrorActionPreference="Stop"; $az="C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"; $cfg=Get-Content input.json -Raw|ConvertFrom-Json
           Write-Host "Configured Azure OpenAI names: $((@($cfg.landingZones.openAiServices) | ForEach-Object { $_.name }) -join ', ')"
           foreach($x in @($cfg.landingZones.openAiServices)){
-            $v=@{accountName=$x.name;location=$x.location;skuName=$x.skuName;customSubDomainName=$x.customSubDomainName;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
+            $v=@{accountName=$x.name;deploymentSuffix=$env:DEPLOYMENT_SUFFIX;location=$x.location;skuName=$x.skuName;customSubDomainName=$x.customSubDomainName;publicNetworkAccess=$x.publicNetworkAccess;tags=$x.tags}; $p=@{'$schema'='https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#';contentVersion='1.0.0.0';parameters=@{}}
             foreach($k in $v.Keys){$p.parameters[$k]=@{value=$v[$k]}}; $f="$env:RUNNER_TEMP\openai.json"; $p|ConvertTo-Json -Depth 100|Set-Content $f
             & $az deployment group what-if -g $x.resourceGroupName -f "modules/ai/openai.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "OpenAI What-If failed"}
             & $az deployment group create -g $x.resourceGroupName -n "pike-openai-${{ github.run_id }}" -f "modules/ai/openai.bicep" --parameters "@$f"; if($LASTEXITCODE -ne 0){throw "OpenAI deployment failed"}
@@ -389,3 +476,409 @@ jobs:
   #         foreach($x in @($cfg.landingZones.openAiServices)){& $az cognitiveservices account show -g $x.resourceGroupName -n $x.name --query name -o tsv;if($LASTEXITCODE -ne 0){throw "OpenAI verification failed: $($x.name)"}}
   #         foreach($x in @($cfg.landingZones.vms)){& $az vm show -g $x.resourceGroupName -n $x.name --query provisioningState -o tsv;if($LASTEXITCODE -ne 0){throw "VM verification failed: $($x.name)"}}
   #         Write-Host "All configured resources were verified."
+
+  deploy-rbac:
+    name: Deploy RBAC assignments
+    runs-on: [self-hosted, X64, Windows]
+    needs: deploy-vm
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Process all RBAC scopes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+
+          $results = [System.Collections.Generic.List[object]]::new()
+
+          function Add-Result {
+            param(
+              [string]$Scope,
+              [string]$Target,
+              [string]$Principal,
+              [string]$Role,
+              [string]$Status,
+              [string]$AssignmentId = "",
+              [string]$ErrorMessage = ""
+            )
+
+            $results.Add([PSCustomObject]@{
+              Scope = $Scope
+              Target = $Target
+              Principal = $Principal
+              Role = $Role
+              Status = $Status
+              AssignmentId = $AssignmentId
+              Error = $ErrorMessage
+            })
+          }
+
+          function Resolve-Principal {
+            param($Access)
+
+            if ([string]::IsNullOrWhiteSpace($Access.principalEmail)) {
+              throw "INPUT ERROR: principalEmail is missing."
+            }
+
+            if ($Access.principalType -ne "User") {
+              throw "UNSUPPORTED: Only User principal lookup is currently implemented."
+            }
+
+            $id = & $az ad user show `
+                --id $Access.principalEmail `
+                --query id -o tsv 2>&1
+
+            if ($LASTEXITCODE -ne 0) {
+              $errorText = $id -join "`n"
+
+              if ($errorText -match "Insufficient privileges") {
+                throw "ENTRA PERMISSION ERROR: GitHub Actions identity cannot read Entra users. Check Microsoft Graph permissions and admin consent."
+              }
+
+              throw "ENTRA LOOKUP ERROR: Unable to resolve $($Access.principalEmail). Details: $errorText"
+            }
+
+            $principalId = ($id -join "").Trim()
+
+            if ([string]::IsNullOrWhiteSpace($principalId)) {
+              throw "ENTRA LOOKUP ERROR: No object ID returned for $($Access.principalEmail)."
+            }
+
+            return $principalId
+          }
+
+          function Invoke-RbacAssignment {
+            param(
+              [string]$Scope,
+              [string]$Template,
+              [string]$DeploymentScope,
+              [string]$Target,
+              $Access,
+              [hashtable]$ExtraParameters = @{},
+              [string]$Location = ""
+            )
+
+            try {
+
+              $principalId = Resolve-Principal $Access
+
+              if ([string]::IsNullOrWhiteSpace($Access.roleDefinitionGuid)) {
+                throw "roleDefinitionGuid is required."
+              }
+
+              $parameters = @{
+                principalId = $principalId
+                roleDefinitionGuid = $Access.roleDefinitionGuid
+                principalType = $Access.principalType
+              }
+
+              foreach ($key in $ExtraParameters.Keys) {
+                $parameters[$key] = $ExtraParameters[$key]
+              }
+
+              $deploymentParameters = @{
+                '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+                contentVersion = '1.0.0.0'
+                parameters = @{}
+              }
+
+              foreach ($key in $parameters.Keys) {
+                $deploymentParameters.parameters[$key] = @{
+                  value = $parameters[$key]
+                }
+              }
+
+              $parameterFile = Join-Path `
+                $env:RUNNER_TEMP `
+                "rbac-$([guid]::NewGuid()).json"
+
+              $deploymentParameters |
+                ConvertTo-Json -Depth 30 |
+                Set-Content -Path $parameterFile -Encoding utf8
+
+              $deploymentName = "rbac-$Scope-${{ github.run_id }}-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+
+              # WHAT-IF
+
+              $whatIfArgs = @(
+                "deployment"
+                $DeploymentScope
+                "what-if"
+                "--name"
+                "$deploymentName-preview"
+                "--template-file"
+                $Template
+                "--parameters"
+                "@$parameterFile"
+              )
+
+              if ($DeploymentScope -eq "sub") {
+                $whatIfArgs += @("--location", $Location)
+              }
+              else {
+                $whatIfArgs += @("--resource-group", $Target)
+              }
+
+              & $az @whatIfArgs
+
+              if ($LASTEXITCODE -ne 0) {
+                throw "What-If failed."
+              }
+
+              # DEPLOYMENT
+
+              $createArgs = @(
+                "deployment"
+                $DeploymentScope
+                "create"
+                "--name"
+                $deploymentName
+                "--template-file"
+                $Template
+                "--parameters"
+                "@$parameterFile"
+                "--output"
+                "json"
+              )
+
+              if ($DeploymentScope -eq "sub") {
+                $createArgs += @("--location", $Location)
+              }
+              else {
+                $createArgs += @("--resource-group", $Target)
+              }
+
+              $output = & $az @createArgs
+
+              if ($LASTEXITCODE -ne 0) {
+                throw "Azure deployment failed."
+              }
+
+              $deploymentResult = ($output -join "`n") | ConvertFrom-Json
+
+              $assignmentId = $deploymentResult.properties.outputs.roleAssignmentId.value
+
+              Add-Result `
+                -Scope $Scope `
+                -Target $Target `
+                -Principal $Access.principalEmail `
+                -Role $Access.roleDefinitionName `
+                -Status "DEPLOYED" `
+                -AssignmentId $assignmentId
+
+              Write-Host "$Scope assignment completed."
+
+            }
+            catch {
+
+              Add-Result `
+                -Scope $Scope `
+                -Target $Target `
+                -Principal $Access.principalEmail `
+                -Role $Access.roleDefinitionName `
+                -Status "FAILED" `
+                -ErrorMessage $_.Exception.Message
+
+              Write-Warning "$Scope assignment failed: $($_.Exception.Message)"
+            }
+          }
+
+          # =========================================
+          # 1. SUBSCRIPTION SCOPE
+          # =========================================
+
+          # Read optional RBAC arrays safely. Missing arrays become empty arrays,
+          # so scopes not requested in input.json are skipped without false failures.
+          function Get-OptionalRbacEntries {
+            param(
+              $RbacConfig,
+              [string]$PropertyName
+            )
+
+            if ($null -eq $RbacConfig) {
+              return
+            }
+
+            $property = $RbacConfig.PSObject.Properties[$PropertyName]
+
+            if ($null -eq $property -or $null -eq $property.Value) {
+              return
+            }
+
+            return @(
+              $property.Value | Where-Object {
+                $null -ne $_
+              }
+            )
+          }
+
+          $subscriptionAccess = @(
+            Get-OptionalRbacEntries -RbacConfig $cfg.rbac -PropertyName "subscriptionAccess"
+          )
+
+          if ($subscriptionAccess.Count -eq 0) {
+            Write-Host "No subscription RBAC entries. Skipping."
+          }
+
+          foreach ($access in $subscriptionAccess) {
+
+            Invoke-RbacAssignment `
+              -Scope "subscription" `
+              -Template "modules/RBAC/RBAC_subscription.bicep" `
+              -DeploymentScope "sub" `
+              -Target "Subscription" `
+              -Access $access `
+              -Location $cfg.deployment.location
+          }
+
+          # =========================================
+          # 2. RESOURCE GROUP SCOPE
+          # =========================================
+
+          $resourceGroupAccess = @(
+            Get-OptionalRbacEntries -RbacConfig $cfg.rbac -PropertyName "resourceGroupAccess"
+          )
+
+          if ($resourceGroupAccess.Count -eq 0) {
+            Write-Host "No resource-group RBAC entries. Skipping."
+          }
+
+          foreach ($access in $resourceGroupAccess) {
+
+            $target = @(
+              $cfg.landingZones.resourceGroups |
+              Where-Object {
+                $_.rgName -eq $access.resourceGroupName
+              }
+            )
+
+            if ($target.Count -ne 1) {
+
+              Add-Result `
+                -Scope "resource-group" `
+                -Target $access.resourceGroupName `
+                -Principal $access.principalEmail `
+                -Role $access.roleDefinitionName `
+                -Status "FAILED" `
+                -ErrorMessage "Resource group not found or ambiguous."
+
+              continue
+            }
+
+            Invoke-RbacAssignment `
+              -Scope "resource-group" `
+              -Template "modules/RBAC/RBAC_resource_group.bicep" `
+              -DeploymentScope "group" `
+              -Target $access.resourceGroupName `
+              -Access $access
+          }
+
+          # =========================================
+          # 3. RESOURCE SCOPE
+          # =========================================
+
+          $resourceAccess = @(
+            Get-OptionalRbacEntries -RbacConfig $cfg.rbac -PropertyName "resourceAccess"
+          )
+
+          if ($resourceAccess.Count -eq 0) {
+            Write-Host "No resource-level RBAC entries. Skipping."
+          }
+
+          foreach ($access in $resourceAccess) {
+
+            if ($access.resourceType -ne "Microsoft.Storage/storageAccounts") {
+
+              Add-Result `
+                -Scope "resource" `
+                -Target $access.resourceName `
+                -Principal $access.principalEmail `
+                -Role $access.roleDefinitionName `
+                -Status "FAILED" `
+                -ErrorMessage "Unsupported resource type."
+
+              continue
+            }
+
+            $targetRg = @(
+              $cfg.landingZones.resourceGroups |
+              Where-Object {
+                $_.rgName -eq $access.resourceGroupName
+              }
+            )
+
+            $targetResource = @(
+              $cfg.landingZones.storageAccounts |
+              Where-Object {
+                $_.name -eq $access.resourceName -and
+                $_.resourceGroupName -eq $access.resourceGroupName
+              }
+            )
+
+            if ($targetRg.Count -ne 1 -or $targetResource.Count -ne 1) {
+
+              Add-Result `
+                -Scope "resource" `
+                -Target $access.resourceName `
+                -Principal $access.principalEmail `
+                -Role $access.roleDefinitionName `
+                -Status "FAILED" `
+                -ErrorMessage "Target resource or resource group not found in input.json."
+
+              continue
+            }
+
+            Invoke-RbacAssignment `
+              -Scope "resource" `
+              -Template "modules/RBAC/RBAC_resource.bicep" `
+              -DeploymentScope "group" `
+              -Target $access.resourceGroupName `
+              -Access $access `
+              -ExtraParameters @{
+                storageAccountName = $access.resourceName
+              }
+          }
+
+          # =========================================
+          # FINAL RESULTS
+          # =========================================
+
+          $resultFile = "$env:RUNNER_TEMP\rbac-results.json"
+
+          $results |
+            ConvertTo-Json -Depth 30 |
+            Set-Content -Path $resultFile -Encoding utf8
+
+          $results |
+            Format-Table Scope, Target, Principal, Role, Status -AutoSize
+
+          $failed = @(
+            $results | Where-Object { $_.Status -eq "FAILED" }
+          )
+
+          Write-Host "Total assignments: $($results.Count)"
+          Write-Host "Failed assignments: $($failed.Count)"
+
+          if ($failed.Count -gt 0) {
+            throw "One or more RBAC assignments failed."
+          }
+
+      - name: Upload RBAC result report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RBAC-Deployment-Results-${{ github.run_id }}
+          path: ${{ runner.temp }}/rbac-results.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,6 +1,9 @@
 @description('Azure OpenAI account name.')
 param accountName string
 
+@description('Unique deployment suffix from GitHub Actions run ID and attempt.')
+param deploymentSuffix string
+
 @description('Azure region.')
 param location string
 
@@ -20,15 +23,18 @@ param publicNetworkAccess string
 @description('Resource tags.')
 param tags object
 
+var uniqueAccountName = '${substring(accountName, 0, min(length(accountName), 20))}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix)}'
+var uniqueCustomSubDomainName = '${substring(customSubDomainName, 0, min(length(customSubDomainName), 20))}${uniqueString(subscription().id, resourceGroup().id, deploymentSuffix, 'subdomain')}'
+
 resource openAiService 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
-  name: accountName
+  name: uniqueAccountName
   location: location
   kind: 'OpenAI'
   sku: {
     name: skuName
   }
   properties: {
-    customSubDomainName: customSubDomainName
+    customSubDomainName: uniqueCustomSubDomainName
     publicNetworkAccess: publicNetworkAccess
   }
   tags: tags
