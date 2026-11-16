@@ -639,6 +639,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: azure/login@v2
+        id: azure-login-rbac
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -1034,3 +1035,158 @@ jobs:
           path: ${{ runner.temp }}/rbac-results.json
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Deploy PostgreSQL Flexible Servers (Private VNet Integration)
+        if: always() && steps.azure-login-rbac.outcome == 'success'
+        shell: pwsh
+        env:
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          $template = "modules/database/postgresql.bicep"
+
+          if (-not (Test-Path -LiteralPath $template)) {
+            Write-Warning "PostgreSQL Bicep module is missing. Skipping PostgreSQL deployment."
+            return
+          }
+
+          $items = @($cfg.landingZones.postgresqlServers | Where-Object { $null -ne $_ })
+          if ($items.Count -eq 0) {
+            Write-Host "No postgresqlServers entries configured. Skipping PostgreSQL deployment."
+            return
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:POSTGRES_ADMIN_PASSWORD)) {
+            throw "GitHub secret POSTGRES_ADMIN_PASSWORD is required. Add it under repository or environment secrets."
+          }
+
+          function Convert-CidrToRange {
+            param([string]$Cidr)
+            $parts = $Cidr.Split('/')
+            if ($parts.Count -ne 2) { throw "Invalid IPv4 CIDR: $Cidr" }
+            $ip = [System.Net.IPAddress]::Parse($parts[0])
+            if ($ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+              throw "Only IPv4 CIDR ranges are supported: $Cidr"
+            }
+            $prefix = [int]$parts[1]
+            if ($prefix -lt 0 -or $prefix -gt 32) { throw "Invalid CIDR prefix: $Cidr" }
+            $bytes = $ip.GetAddressBytes()
+            [Array]::Reverse($bytes)
+            $address = [uint64][BitConverter]::ToUInt32($bytes, 0)
+            $hostBits = 32 - $prefix
+            $size = [uint64][Math]::Pow(2, $hostBits)
+            if ($prefix -eq 0) { $mask = [uint64]0 }
+            else { $mask = ([uint64]4294967295 -shl $hostBits) -band [uint64]4294967295 }
+            $start = $address -band $mask
+            return @{ Start = [uint64]$start; End = [uint64]($start + $size - 1) }
+          }
+
+          foreach ($x in $items) {
+            $parameterFile = $null
+            try {
+              foreach ($required in @("serverName", "resourceGroupName", "location", "administratorLogin", "vnetName", "subnetName", "subnetAddressPrefix")) {
+                if ([string]::IsNullOrWhiteSpace([string]$x.$required)) {
+                  throw "PostgreSQL input is missing required property '$required'."
+                }
+              }
+
+              # Confirm the target VNet exists and is in the same region as PostgreSQL.
+              $vnetJson = & $az network vnet show --resource-group $x.resourceGroupName --name $x.vnetName --output json 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                throw "VNet '$($x.vnetName)' was not found in resource group '$($x.resourceGroupName)'. Deploy the existing VNet first."
+              }
+              $vnet = ($vnetJson -join "`n") | ConvertFrom-Json
+              if ($vnet.location -ne $x.location) {
+                throw "PostgreSQL region '$($x.location)' must match VNet region '$($vnet.location)' for VNet integration."
+              }
+
+              # Validate that the dedicated PostgreSQL subnet is within the VNet address space.
+              $targetRange = Convert-CidrToRange -Cidr $x.subnetAddressPrefix
+              $insideVnet = $false
+              foreach ($vnetPrefix in @($vnet.addressSpace.addressPrefixes)) {
+                $vnetRange = Convert-CidrToRange -Cidr $vnetPrefix
+                if ($targetRange.Start -ge $vnetRange.Start -and $targetRange.End -le $vnetRange.End) {
+                  $insideVnet = $true
+                  break
+                }
+              }
+              if (-not $insideVnet) {
+                throw "PostgreSQL subnet '$($x.subnetAddressPrefix)' is outside the VNet address space."
+              }
+
+              # Prevent overlap with any other subnet already deployed in the VNet.
+              $subnetJson = & $az network vnet subnet list --resource-group $x.resourceGroupName --vnet-name $x.vnetName --output json 2>&1
+              if ($LASTEXITCODE -ne 0) { throw "Could not list existing VNet subnets for overlap validation." }
+              $existingSubnets = ($subnetJson -join "`n") | ConvertFrom-Json
+              foreach ($existingSubnet in $existingSubnets) {
+                if ($existingSubnet.name -eq $x.subnetName) {
+                  if ($existingSubnet.addressPrefix -and $existingSubnet.addressPrefix -ne $x.subnetAddressPrefix) {
+                    throw "Subnet '$($x.subnetName)' already exists with prefix '$($existingSubnet.addressPrefix)', not '$($x.subnetAddressPrefix)'."
+                  }
+                  continue
+                }
+                $existingPrefixes = @()
+                if ($existingSubnet.addressPrefix) { $existingPrefixes += $existingSubnet.addressPrefix }
+                if ($existingSubnet.addressPrefixes) { $existingPrefixes += @($existingSubnet.addressPrefixes) }
+                foreach ($existingPrefix in $existingPrefixes) {
+                  $existingRange = Convert-CidrToRange -Cidr $existingPrefix
+                  if ($targetRange.Start -le $existingRange.End -and $existingRange.Start -le $targetRange.End) {
+                    throw "PostgreSQL subnet '$($x.subnetAddressPrefix)' overlaps existing subnet '$($existingSubnet.name)' ($existingPrefix)."
+                  }
+                }
+              }
+
+              $parameters = @{
+                '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+                contentVersion = '1.0.0.0'
+                parameters = @{
+                  serverName = @{ value = $x.serverName }
+                  location = @{ value = $x.location }
+                  administratorLogin = @{ value = $x.administratorLogin }
+                  administratorLoginPassword = @{ value = $env:POSTGRES_ADMIN_PASSWORD }
+                  version = @{ value = [string]$x.version }
+                  skuName = @{ value = $x.skuName }
+                  skuTier = @{ value = $x.skuTier }
+                  storageSizeGB = @{ value = [int]$x.storageSizeGB }
+                  backupRetentionDays = @{ value = [int]$x.backupRetentionDays }
+                  vnetName = @{ value = $x.vnetName }
+                  subnetName = @{ value = $x.subnetName }
+                  subnetAddressPrefix = @{ value = $x.subnetAddressPrefix }
+                  privateDnsZoneName = @{ value = $x.privateDnsZoneName }
+                  privateDnsZoneLinkName = @{ value = $x.privateDnsZoneLinkName }
+                  tags = @{ value = $x.tags }
+                }
+              }
+
+              $parameterFile = Join-Path $env:RUNNER_TEMP "postgresql-$([guid]::NewGuid().ToString('N')).json"
+              $json = $parameters | ConvertTo-Json -Depth 50
+              [System.IO.File]::WriteAllText($parameterFile, $json, [System.Text.UTF8Encoding]::new($false))
+
+              $deploymentName = "pike-postgresql-${{ github.run_id }}-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+
+              Write-Host "Running What-If for PostgreSQL server '$($x.serverName)' in private VNet mode."
+              & $az deployment group what-if --resource-group $x.resourceGroupName --name "$deploymentName-preview" --template-file $template --parameters "@$parameterFile"
+              if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL What-If failed for '$($x.serverName)'."
+              }
+
+              & $az deployment group create --resource-group $x.resourceGroupName --name $deploymentName --template-file $template --parameters "@$parameterFile" --output json
+              if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL deployment failed for '$($x.serverName)'."
+              }
+
+              Write-Host "PostgreSQL Flexible Server '$($x.serverName)' deployment completed."
+            }
+            catch {
+              Write-Warning "PostgreSQL deployment failed for '$($x.serverName)': $($_.Exception.Message)"
+              continue
+            }
+            finally {
+              if ($parameterFile -and (Test-Path -LiteralPath $parameterFile)) {
+                Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
