@@ -1043,7 +1043,7 @@ jobs:
           POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          $az = "C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin\\az.cmd"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
           $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
           $template = "modules/database/postgresql/postgresql.bicep"
 
