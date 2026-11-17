@@ -586,6 +586,115 @@ jobs:
             & $az deployment group create -g $x.resourceGroupName -n "pike-vm-${{ github.run_id }}-$([guid]::NewGuid().ToString('N').Substring(0,8))" -f "modules/compute/vm.bicep" --parameters "@$f" "vmAdminPassword=$env:VM_ADMIN_PASSWORD"; if($LASTEXITCODE -ne 0){Write-Warning "VM deployment failed"; continue}
           }
 
+  deploy-postgresql:
+    name: Deploy PostgreSQL Flexible Servers
+    runs-on: [self-hosted, X64, Windows]
+    needs: [prechecks, azure-login-check, deploy-vm]
+    if: ${{ always() && needs.prechecks.result == 'success' && needs.azure-login-check.result == 'success' }}
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-If and deploy PostgreSQL Flexible Servers
+        shell: pwsh
+        env:
+          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $az = "C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin\\az.cmd"
+          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
+          $template = "modules/database/postgresql/postgresql.bicep"
+
+          if (-not (Test-Path -LiteralPath $template)) {
+            throw "PostgreSQL Bicep module was not found: $template"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:POSTGRES_ADMIN_PASSWORD)) {
+            throw "GitHub secret POSTGRES_ADMIN_PASSWORD is required."
+          }
+
+          $items = @($cfg.landingZones.postgresqlServers | Where-Object { $null -ne $_ })
+          if ($items.Count -eq 0) {
+            Write-Host "No PostgreSQL servers configured. Skipping deployment."
+            return
+          }
+
+          foreach ($x in $items) {
+            $parameterFile = $null
+            try {
+              foreach ($required in @("serverName", "resourceGroupName", "location", "administratorLogin", "version", "skuName", "skuTier", "storageSizeGB", "backupRetentionDays", "vnetName", "subnetName", "subnetAddressPrefix", "privateDnsZoneName", "privateDnsZoneLinkName")) {
+                if ([string]::IsNullOrWhiteSpace([string]$x.$required)) {
+                  throw "Required PostgreSQL input '$required' is missing for server '$($x.serverName)'."
+                }
+              }
+
+              $vnetJson = & $az network vnet show --resource-group $x.resourceGroupName --name $x.vnetName --output json 2>&1
+              if ($LASTEXITCODE -ne 0) {
+                throw "VNet '$($x.vnetName)' was not found in resource group '$($x.resourceGroupName)'."
+              }
+
+              $vnet = ($vnetJson -join "`n") | ConvertFrom-Json
+              if ($vnet.location -ne $x.location) {
+                throw "PostgreSQL location '$($x.location)' must match VNet location '$($vnet.location)'."
+              }
+
+              $parameters = @{
+                '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
+                contentVersion = '1.0.0.0'
+                parameters = @{
+                  serverName = @{ value = $x.serverName }
+                  location = @{ value = $x.location }
+                  administratorLogin = @{ value = $x.administratorLogin }
+                  administratorLoginPassword = @{ value = $env:POSTGRES_ADMIN_PASSWORD }
+                  version = @{ value = [string]$x.version }
+                  skuName = @{ value = $x.skuName }
+                  skuTier = @{ value = $x.skuTier }
+                  storageSizeGB = @{ value = [int]$x.storageSizeGB }
+                  backupRetentionDays = @{ value = [int]$x.backupRetentionDays }
+                  vnetName = @{ value = $x.vnetName }
+                  subnetName = @{ value = $x.subnetName }
+                  subnetAddressPrefix = @{ value = $x.subnetAddressPrefix }
+                  privateDnsZoneName = @{ value = $x.privateDnsZoneName }
+                  privateDnsZoneLinkName = @{ value = $x.privateDnsZoneLinkName }
+                  tags = @{ value = $x.tags }
+                }
+              }
+
+              $parameterFile = Join-Path $env:RUNNER_TEMP "postgresql-$([guid]::NewGuid().ToString('N')).json"
+              $parameters | ConvertTo-Json -Depth 50 | Set-Content -Path $parameterFile -Encoding utf8
+              $deploymentName = "pike-postgresql-${{ github.run_id }}-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+
+              Write-Host "Running PostgreSQL What-If for '$($x.serverName)'."
+              & $az deployment group what-if --resource-group $x.resourceGroupName --name "$deploymentName-preview" --template-file $template --parameters "@$parameterFile"
+              if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL What-If failed for '$($x.serverName)'."
+              }
+
+              Write-Host "Deploying PostgreSQL Flexible Server '$($x.serverName)'."
+              & $az deployment group create --resource-group $x.resourceGroupName --name $deploymentName --template-file $template --parameters "@$parameterFile" --output json
+              if ($LASTEXITCODE -ne 0) {
+                throw "PostgreSQL deployment failed for '$($x.serverName)'."
+              }
+
+              Write-Host "PostgreSQL deployment command completed for '$($x.serverName)'."
+            }
+            catch {
+              Write-Warning "PostgreSQL server '$($x.serverName)' failed: $($_.Exception.Message)"
+              continue
+            }
+            finally {
+              if ($parameterFile -and (Test-Path -LiteralPath $parameterFile)) {
+                Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
   # verify:
   #   name: Final Azure Resource Verification
   #   runs-on: [self-hosted, X64, Windows]
@@ -631,7 +740,7 @@ jobs:
   deploy-rbac:
     name: Deploy RBAC assignments
     runs-on: [self-hosted, X64, Windows]
-    needs: [prechecks, azure-login-check, deploy-vm]
+    needs: [prechecks, azure-login-check, deploy-vm, deploy-postgresql]
     if: ${{ always() && needs.prechecks.result == 'success' && needs.azure-login-check.result == 'success' }}
     environment: dev
 
@@ -644,98 +753,6 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Deploy PostgreSQL Flexible Servers (Private VNet Integration)
-        if: always() && steps.azure-login-rbac.outcome == 'success'
-        shell: pwsh
-        env:
-          POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
-          $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
-          $template = "modules/database/postgresql/postgresql.bicep"
-
-          if (-not (Test-Path -LiteralPath $template)) {
-            throw "PostgreSQL Bicep module was not found: $template"
-          }
-          if ([string]::IsNullOrWhiteSpace($env:POSTGRES_ADMIN_PASSWORD)) {
-            throw "GitHub secret POSTGRES_ADMIN_PASSWORD is required."
-          }
-
-          $items = @($cfg.landingZones.postgresqlServers | Where-Object { $null -ne $_ })
-          if ($items.Count -eq 0) {
-            Write-Host "No PostgreSQL servers are configured. Skipping deployment."
-            return
-          }
-
-          foreach ($x in $items) {
-            $parameterFile = $null
-            try {
-              foreach ($required in @("serverName", "resourceGroupName", "location", "administratorLogin", "vnetName", "subnetName", "subnetAddressPrefix", "privateDnsZoneName", "privateDnsZoneLinkName")) {
-                if ([string]::IsNullOrWhiteSpace([string]$x.$required)) {
-                  throw "Required PostgreSQL input '$required' is missing for server '$($x.serverName)'."
-                }
-              }
-
-              $vnetJson = & $az network vnet show --resource-group $x.resourceGroupName --name $x.vnetName --output json 2>&1
-              if ($LASTEXITCODE -ne 0) {
-                throw "VNet '$($x.vnetName)' was not found in resource group '$($x.resourceGroupName)'."
-              }
-              $vnet = ($vnetJson -join "`n") | ConvertFrom-Json
-              if ($vnet.location -ne $x.location) {
-                throw "PostgreSQL location '$($x.location)' must match VNet location '$($vnet.location)'."
-              }
-
-              $parameters = @{
-                '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
-                contentVersion = '1.0.0.0'
-                parameters = @{
-                  serverName = @{ value = $x.serverName }
-                  location = @{ value = $x.location }
-                  administratorLogin = @{ value = $x.administratorLogin }
-                  administratorLoginPassword = @{ value = $env:POSTGRES_ADMIN_PASSWORD }
-                  version = @{ value = [string]$x.version }
-                  skuName = @{ value = $x.skuName }
-                  skuTier = @{ value = $x.skuTier }
-                  storageSizeGB = @{ value = [int]$x.storageSizeGB }
-                  backupRetentionDays = @{ value = [int]$x.backupRetentionDays }
-                  vnetName = @{ value = $x.vnetName }
-                  subnetName = @{ value = $x.subnetName }
-                  subnetAddressPrefix = @{ value = $x.subnetAddressPrefix }
-                  privateDnsZoneName = @{ value = $x.privateDnsZoneName }
-                  privateDnsZoneLinkName = @{ value = $x.privateDnsZoneLinkName }
-                  tags = @{ value = $x.tags }
-                }
-              }
-
-              $parameterFile = Join-Path $env:RUNNER_TEMP "postgresql-$([guid]::NewGuid().ToString('N')).json"
-              $parameters | ConvertTo-Json -Depth 50 | Set-Content -Path $parameterFile -Encoding utf8
-              $deploymentName = "pike-postgresql-${{ github.run_id }}-$([guid]::NewGuid().ToString('N').Substring(0,8))"
-
-              Write-Host "Previewing PostgreSQL Flexible Server '$($x.serverName)' in resource group '$($x.resourceGroupName)'."
-              & $az deployment group what-if --resource-group $x.resourceGroupName --name "$deploymentName-preview" --template-file $template --parameters "@$parameterFile"
-              if ($LASTEXITCODE -ne 0) {
-                throw "PostgreSQL What-If failed for '$($x.serverName)'."
-              }
-
-              Write-Host "Deploying PostgreSQL Flexible Server '$($x.serverName)'."
-              & $az deployment group create --resource-group $x.resourceGroupName --name $deploymentName --template-file $template --parameters "@$parameterFile" --output json
-              if ($LASTEXITCODE -ne 0) {
-                throw "PostgreSQL deployment failed for '$($x.serverName)'."
-              }
-              Write-Host "PostgreSQL Flexible Server '$($x.serverName)' deployment command completed."
-            }
-            catch {
-              Write-Warning "PostgreSQL server '$($x.serverName)' failed: $($_.Exception.Message)"
-              continue
-            }
-            finally {
-              if ($parameterFile -and (Test-Path -LiteralPath $parameterFile)) {
-                Remove-Item -LiteralPath $parameterFile -Force -ErrorAction SilentlyContinue
-              }
-            }
-          }
 
       - name: Process all RBAC scopes
         shell: pwsh
