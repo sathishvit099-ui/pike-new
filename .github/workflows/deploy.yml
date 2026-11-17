@@ -607,7 +607,7 @@ jobs:
           POSTGRES_ADMIN_PASSWORD: ${{ secrets.POSTGRES_ADMIN_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
-          $az = "C:\\Program Files\\Microsoft SDKs\\Azure\\CLI2\\wbin\\az.cmd"
+          $az = "C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
           $cfg = Get-Content "input.json" -Raw | ConvertFrom-Json
           $template = "modules/database/postgresql/postgresql.bicep"
 
@@ -633,6 +633,11 @@ jobs:
                   throw "Required PostgreSQL input '$required' is missing for server '$($x.serverName)'."
                 }
               }
+
+              if ([string]$x.version -notin @("14", "15")) {
+                throw "Unsupported PostgreSQL version '$($x.version)'. This deployment currently accepts versions 14 or 15."
+              }
+              Write-Host "PostgreSQL server '$($x.serverName)' requested version: $($x.version)"
 
               $vnetJson = & $az network vnet show --resource-group $x.resourceGroupName --name $x.vnetName --output json 2>&1
               if ($LASTEXITCODE -ne 0) {
