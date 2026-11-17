@@ -15,9 +15,8 @@ param administratorLoginPassword string
 @allowed([
   '14'
   '15'
-  '16'
 ])
-param version string = '16'
+param version string = '15'
 
 @description('Compute SKU name.')
 param skuName string = 'Standard_B1ms'
