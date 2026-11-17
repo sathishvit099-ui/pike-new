@@ -146,7 +146,7 @@
         "resourceGroupName": "rg-pikehex-dev-eastus-001",
         "location": "eastus",
         "administratorLogin": "pikehexpgadmin",
-        "version": "16",
+        "version": "15",
         "skuName": "Standard_B1ms",
         "skuTier": "Burstable",
         "storageSizeGB": 32,
@@ -199,7 +199,6 @@
         }
       }
     ],
-
     "applicationGatewaySubnets": [
       {
         "vnetName": "vnet-pikehex-dev-001",
