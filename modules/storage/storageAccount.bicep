@@ -1,12 +1,24 @@
+// Pike naming: stpike<purpose><env>      e.g. stpikesftpdev
+// No spaces, no hyphens, all lowercase: 3-24 lowercase letters/digits only.
+// Globally unique via the "pike" prefix.
+// Length limit 24: stpike(6) + purpose(<=14) + env(<=4) = 24.
 
-@description('Storage account name; globally unique, lowercase, 3-24 characters.')
-param storageAccountName string
+@description('Environment token.')
+@allowed(['dev', 'qa', 'uat', 'prod'])
+param environmentName string
+
+@description('Workload token (used for the workload tag).')
+@minLength(3)
+@maxLength(60)
+param workload string
+
+@description('Deployment purpose token (input.json target.purpose), lowercase letters/digits.')
+@minLength(2)
+@maxLength(11)
+param purpose string
 
 @description('Azure region.')
 param location string
-
-@description('Resource tags.')
-param tags object
 
 @description('Storage account SKU.')
 param skuName string
@@ -50,10 +62,17 @@ param blobServiceName string
 ])
 param containerPublicAccess string
 
+@description('Tags. Must contain owner, cost-center and data-class; env and workload are added here.')
+param tags object
+
+// Storage account rule: no spaces, no hyphens, all lowercase. The name is normalised here so a
+// non-compliant name can never be produced, even if a caller passes a mixed-case or hyphenated token.
+var storageAccountName = toLower(replace(replace(replace(replace('stpike${purpose}${environmentName}', ' ', ''), '-', ''), '_', ''), '.', ''))
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
-  tags: tags
+  tags: union(tags, { env: environmentName, workload: workload })
   sku: {
     name: skuName
   }
@@ -91,6 +110,6 @@ resource containers 'Microsoft.Storage/storageAccounts/blobServices/containers@2
   }
 ]
 
-output storageAccountId string = storageAccount.id
-output storageAccountNameOut string = storageAccount.name
+output deployedResourceId string = storageAccount.id
+output deployedResourceName string = storageAccount.name
 output containerNamesOut array = containerNames

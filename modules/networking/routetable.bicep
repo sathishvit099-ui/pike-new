@@ -1,5 +1,18 @@
-@description('Route table name.')
-param routeTableName string
+// Pike naming: rt-pike-<purpose>-<env>      e.g. rt-pike-private-dev
+
+@description('Environment token.')
+@allowed(['dev', 'qa', 'uat', 'prod'])
+param environmentName string
+
+@description('Workload token (used for the workload tag).')
+@minLength(3)
+@maxLength(60)
+param workload string
+
+@description('Deployment purpose token (input.json target.purpose).')
+@minLength(2)
+@maxLength(11)
+param purpose string
 
 @description('Azure region.')
 param location string
@@ -10,13 +23,15 @@ param disableBgpRoutePropagation bool
 @description('Route objects matching Azure route properties.')
 param routes array
 
-@description('Resource tags.')
+@description('Tags. Must contain owner, cost-center and data-class; env and workload are added here.')
 param tags object
+
+var routeTableName = 'rt-pike-${purpose}-${environmentName}'
 
 resource routeTable 'Microsoft.Network/routeTables@2023-09-01' = {
   name: routeTableName
   location: location
-  tags: tags
+  tags: union(tags, { env: environmentName, workload: workload })
   properties: {
     disableBgpRoutePropagation: disableBgpRoutePropagation
     routes: [
@@ -32,5 +47,5 @@ resource routeTable 'Microsoft.Network/routeTables@2023-09-01' = {
   }
 }
 
-output routeTableId string = routeTable.id
-output routeTableNameOut string = routeTable.name
+output deployedResourceId string = routeTable.id
+output deployedResourceName string = routeTable.name

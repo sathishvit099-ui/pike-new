@@ -1,0 +1,502 @@
+name: PIKE Modular Azure Infrastructure Deployment
+
+# How this workflow works
+# - input.json holds only the target environment and a yes/no per resource type.
+# - Every configuration value (SKU, size, image, CIDR, naming tokens, ...) is read from the
+#   GitHub Environment named by input.json "environment" (dev | qa | uat | prod).
+# - Resource names are built inside the existing Bicep modules from naming tokens.
+# - Dynamic sequential plan:
+#     plan    reads input.json and builds an ordered deployment plan that contains ONLY the
+#             resources set to "yes" plus the prerequisites they need (for example a storage
+#             account needs the resource group, so storageAccount=yes gives: RG -> storage account).
+#     deploy  ONE job that walks the plan in order, one module at a time (never in parallel).
+#             Resources that are not in the plan do not appear as jobs at all.
+# - A prerequisite added automatically (not "yes" in input.json) is created only when it does
+#   not exist yet; an existing one is not re-applied. The resource group is always applied
+#   (idempotent: same name, location and tags).
+# - When an entry fails, every entry that depends on it is skipped; independent entries continue.
+#   The run fails if anything failed or was blocked.
+# - A CSV inventory is produced at the end of every run, including failed runs.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  prechecks:
+    name: Repository validation (Bicep, workflows and input)
+    uses: ./.github/workflows/validate-workflows.yml
+
+  plan:
+    name: Read input.json and build deployment plan
+    runs-on: [self-hosted, X64, Windows]
+    needs: prechecks
+    outputs:
+      environment: ${{ steps.read.outputs.environment }}
+      workload: ${{ steps.read.outputs.workload }}
+      system: ${{ steps.read.outputs.system }}
+      purpose: ${{ steps.read.outputs.purpose }}
+      location: ${{ steps.read.outputs.location }}
+      deploy-plan: ${{ steps.read.outputs.deploy-plan }}
+      deploy-count: ${{ steps.read.outputs.deploy-count }}
+      rbac: ${{ steps.read.outputs.rbac }}
+      pim: ${{ steps.read.outputs.pim }}
+      rbac-requestor-email: ${{ steps.read.outputs.rbac-requestor-email }}
+      pim-requestor-email: ${{ steps.read.outputs.pim-requestor-email }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate input.json and build the ordered plan
+        id: read
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const ENVIRONMENTS = ['dev', 'qa', 'uat', 'prod'];
+            const TARGETS = ['resourceGroup', 'networkSecurityGroup', 'routeTable', 'virtualNetwork', 'subnet',
+              'applicationGatewaySubnet', 'loadBalancer', 'applicationGateway', 'keyVault', 'storageAccount',
+              'sqlDatabase', 'openAi', 'vmWindows', 'vmLinux', 'vmWindowsSql', 'postgresql'];
+            const ACCESS = ['rbac', 'pim'];
+            const errors = [];
+            core.setOutput('deploy-plan', '[]');
+            core.setOutput('deploy-count', '0');
+
+            let cfg;
+            try { cfg = JSON.parse(fs.readFileSync('input.json', 'utf8')); }
+            catch (err) { core.setFailed(`input.json could not be read: ${err.message}`); return; }
+
+            const environment = String(cfg.environment ?? '').trim();
+            if (!ENVIRONMENTS.includes(environment)) errors.push(`"environment" must be one of ${ENVIRONMENTS.join(', ')} (found "${environment}").`);
+
+            // Deployment target: workload, system, purpose and region shared by every resource.
+            const target = cfg.target;
+            let workload = '', system = '', purpose = '', location = '';
+            if (target === null || typeof target !== 'object' || Array.isArray(target)) errors.push('"target" must be an object with workload, system, purpose and location.');
+            else {
+              for (const key of Object.keys(target)) if (!['workload', 'system', 'purpose', 'location'].includes(key)) errors.push(`"target.${key}" is not supported. Supported: workload, system, purpose, location.`);
+              workload = String(target.workload ?? '').trim();
+              system = String(target.system ?? '').trim();
+              purpose = String(target.purpose ?? '').trim();
+              location = String(target.location ?? '').trim();
+              if (!/^(int-[a-z0-9]+-[a-z0-9]+(-[a-z0-9]+)*|app-[a-z0-9]+(-[a-z0-9]+)*|platform-svc|shared-infra)$/.test(workload)) {
+                errors.push(`"target.workload" must be int-<system>-<entity>, app-<name>, platform-svc or shared-infra in lowercase (found "${workload}").`);
+              }
+              if (!/^[a-z0-9]+$/.test(system)) errors.push(`"target.system" must be a lowercase token such as sap, okta or fleet (found "${system}").`);
+              // purpose is used in every name, including the Key Vault (max 24) and storage account
+              // (no spaces, no hyphens, all lowercase), so it is limited to 2-11 lowercase letters/digits.
+              if (!/^[a-z0-9]{2,11}$/.test(purpose)) errors.push(`"target.purpose" must be 2-11 lowercase letters/digits - no spaces, no hyphens (found "${purpose}").`);
+              if (!/^[a-z0-9]+$/.test(location)) errors.push(`"target.location" must be an Azure region name such as eastus (found "${location}").`);
+            }
+            core.setOutput('environment', environment);
+            core.setOutput('workload', workload);
+            core.setOutput('system', system);
+            core.setOutput('purpose', purpose);
+            core.setOutput('location', location);
+
+            // resourceTargets.<type> = "yes" | "no"
+            const targets = {};
+            const rt = cfg.resourceTargets;
+            if (rt === null || typeof rt !== 'object' || Array.isArray(rt)) errors.push('"resourceTargets" must be an object.');
+            else {
+              for (const key of Object.keys(rt)) if (!TARGETS.includes(key)) errors.push(`"resourceTargets.${key}" is not a supported resource type. Supported: ${TARGETS.join(', ')}.`);
+              for (const key of TARGETS) {
+                const value = String(rt[key] ?? '').trim().toLowerCase();
+                if (value !== 'yes' && value !== 'no') { errors.push(`"resourceTargets.${key}" must be "yes" or "no".`); targets[key] = 'no'; }
+                else targets[key] = value;
+              }
+            }
+
+            // accessRequests.<rbac|pim> = { "request": "yes|no", "requestorEmail": "user@domain" }
+            const access = {}, emails = {};
+            const ar = cfg.accessRequests;
+            if (ar === null || typeof ar !== 'object' || Array.isArray(ar)) errors.push('"accessRequests" must be an object.');
+            else {
+              for (const key of Object.keys(ar)) if (!ACCESS.includes(key)) errors.push(`"accessRequests.${key}" is not supported. Supported: ${ACCESS.join(', ')}.`);
+              for (const key of ACCESS) {
+                const entry = ar[key];
+                if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) { errors.push(`"accessRequests.${key}" must be an object with "request" and "requestorEmail".`); access[key] = 'no'; emails[key] = ''; continue; }
+                const request = String(entry.request ?? '').trim().toLowerCase();
+                if (request !== 'yes' && request !== 'no') { errors.push(`"accessRequests.${key}.request" must be "yes" or "no".`); access[key] = 'no'; }
+                else access[key] = request;
+                const email = String(entry.requestorEmail ?? '').trim();
+                if (access[key] === 'yes' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) errors.push(`"accessRequests.${key}.requestorEmail" must be a valid email address when request is "yes".`);
+                emails[key] = access[key] === 'yes' ? email : '';
+              }
+            }
+            core.setOutput('rbac', access.rbac || 'no');
+            core.setOutput('pim', access.pim || 'no');
+            core.setOutput('rbac-requestor-email', emails.rbac || '');
+            core.setOutput('pim-requestor-email', emails.pim || '');
+
+            if (errors.length) { core.setFailed('input.json is invalid:\n- ' + errors.join('\n- ')); return; }
+
+            // ---------------------------------------------------------------------------------
+            // Module catalogue, in dependency-safe order. Only existing modules are listed.
+            //   requires: hard prerequisites, added to the plan automatically when missing.
+            //   after:    ordering-only links, used when that resource is also in the plan.
+            //   values:   values computed by the workflow; variables: GitHub Environment variables;
+            //   secrets:  module parameter -> GitHub Environment secret NAME (value never in the plan).
+            // ---------------------------------------------------------------------------------
+            const T = { environmentName: environment, workload, systemName: system, location, purpose };
+            const tok = (...names) => Object.fromEntries(names.map(n => [n, T[n]]));
+            const vmVars = (image, size) => ({
+              imageReference: image, vmSize: size, adminUsername: 'VM_ADMIN_USERNAME',
+              privateIpAllocationMethod: 'VM_PRIVATE_IP_ALLOCATION_METHOD', osDiskStorageAccountType: 'VM_DISK_TYPE',
+              osDiskSizeGB: 'VM_OS_DISK_SIZE_GB', enableBootDiagnostics: 'VM_BOOT_DIAGNOSTICS_ENABLED', tags: 'RESOURCE_TAGS'
+            });
+            const CATALOG = [
+              { key: 'resourceGroup', label: 'Resource Group', short: 'rg', scope: 'subscription',
+                template: 'modules/RG/resourcegroup.bicep', type: 'Microsoft.Resources/resourceGroups', requires: [],
+                expectedName: `rg-${workload}-${environment}`,
+                values: tok('environmentName', 'workload', 'location'),
+                variables: { tags: 'RESOURCE_TAGS' } },
+              { key: 'networkSecurityGroup', label: 'Network Security Group', short: 'nsg',
+                template: 'modules/networking/nsg.bicep', type: 'Microsoft.Network/networkSecurityGroups', requires: ['resourceGroup'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { securityRules: 'NSG_SECURITY_RULES', tags: 'RESOURCE_TAGS' } },
+              { key: 'routeTable', label: 'Route Table', short: 'rt',
+                template: 'modules/networking/routetable.bicep', type: 'Microsoft.Network/routeTables', requires: ['resourceGroup'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { disableBgpRoutePropagation: 'ROUTE_TABLE_DISABLE_BGP_PROPAGATION', routes: 'ROUTE_TABLE_ROUTES', tags: 'RESOURCE_TAGS' } },
+              // An existing VNet is never re-applied, so subnets added later are not removed.
+              { key: 'virtualNetwork', label: 'Virtual Network', short: 'vnet', alwaysSkipIfExists: true,
+                template: 'modules/networking/vnet.bicep', type: 'Microsoft.Network/virtualNetworks', requires: ['resourceGroup'],
+                values: tok('environmentName', 'workload', 'location'),
+                variables: { addressPrefixes: 'VNET_ADDRESS_PREFIXES', dnsServers: 'VNET_DNS_SERVERS', tags: 'RESOURCE_TAGS' } },
+              // The NSG / route table (same purpose) are associated only when they are "yes" in input.json.
+              { key: 'subnet', label: 'Subnet', short: 'snet',
+                template: 'modules/networking/subnet.bicep', type: 'Microsoft.Network/virtualNetworks/subnets',
+                requires: ['virtualNetwork'], after: ['networkSecurityGroup', 'routeTable'],
+                values: { ...tok('environmentName', 'purpose'),
+                  attachNetworkSecurityGroup: String(targets.networkSecurityGroup === 'yes'),
+                  attachRouteTable: String(targets.routeTable === 'yes') },
+                variables: { addressPrefix: 'SUBNET_ADDRESS_PREFIX', serviceEndpoints: 'SUBNET_SERVICE_ENDPOINTS',
+                  privateEndpointNetworkPolicies: 'SUBNET_PRIVATE_ENDPOINT_NETWORK_POLICIES',
+                  privateLinkServiceNetworkPolicies: 'SUBNET_PRIVATE_LINK_SERVICE_NETWORK_POLICIES' } },
+              { key: 'applicationGatewaySubnet', label: 'Application Gateway Subnet', short: 'agwsnet',
+                template: 'modules/networking/applicationGatewaySubnet.bicep', type: 'Microsoft.Network/virtualNetworks/subnets',
+                requires: ['virtualNetwork'],
+                values: tok('environmentName', 'purpose'),
+                variables: { subnetAddressPrefix: 'APP_GATEWAY_SUBNET_ADDRESS_PREFIX' } },
+              { key: 'loadBalancer', label: 'Load Balancer', short: 'lb',
+                template: 'modules/loadbalancer/lb.bicep', type: 'Microsoft.Network/loadBalancers', requires: ['subnet'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { skuName: 'LOAD_BALANCER_SKU', skuTier: 'LOAD_BALANCER_TIER', frontends: 'LOAD_BALANCER_FRONTENDS',
+                  backendPools: 'LOAD_BALANCER_BACKEND_POOLS', probes: 'LOAD_BALANCER_PROBES', loadBalancingRules: 'LOAD_BALANCER_RULES', tags: 'RESOURCE_TAGS' } },
+              { key: 'applicationGateway', label: 'Application Gateway', short: 'agw',
+                template: 'modules/networking/applicationGateway.bicep', type: 'Microsoft.Network/applicationGateways', requires: ['applicationGatewaySubnet'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { skuName: 'APP_GATEWAY_SKU', privateFrontendIp: 'APP_GATEWAY_PRIVATE_FRONTEND_IP', minCapacity: 'APP_GATEWAY_MIN_CAPACITY',
+                  maxCapacity: 'APP_GATEWAY_MAX_CAPACITY', enableHttp2: 'APP_GATEWAY_ENABLE_HTTP2', frontendPorts: 'APP_GATEWAY_FRONTEND_PORTS',
+                  backendPools: 'APP_GATEWAY_BACKEND_POOLS', backendHttpSettings: 'APP_GATEWAY_BACKEND_HTTP_SETTINGS', healthProbes: 'APP_GATEWAY_HEALTH_PROBES',
+                  listeners: 'APP_GATEWAY_LISTENERS', routingRules: 'APP_GATEWAY_ROUTING_RULES', tags: 'RESOURCE_TAGS' } },
+              { key: 'keyVault', label: 'Key Vault', short: 'kv',
+                template: 'modules/security/keyvault.bicep', type: 'Microsoft.KeyVault/vaults', requires: ['resourceGroup'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { skuName: 'KEY_VAULT_SKU', skuFamily: 'KEY_VAULT_SKU_FAMILY', enableRbacAuthorization: 'KEY_VAULT_RBAC_AUTHORIZATION',
+                  enablePurgeProtection: 'KEY_VAULT_PURGE_PROTECTION', softDeleteRetentionInDays: 'KEY_VAULT_SOFT_DELETE_RETENTION_DAYS',
+                  publicNetworkAccess: 'KEY_VAULT_PUBLIC_NETWORK_ACCESS', tags: 'RESOURCE_TAGS' } },
+              { key: 'storageAccount', label: 'Storage Account', short: 'st',
+                template: 'modules/storage/storageAccount.bicep', type: 'Microsoft.Storage/storageAccounts', requires: ['resourceGroup'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { skuName: 'STORAGE_ACCOUNT_SKU', kind: 'STORAGE_ACCOUNT_KIND', accessTier: 'STORAGE_ACCOUNT_ACCESS_TIER',
+                  minimumTlsVersion: 'STORAGE_ACCOUNT_MIN_TLS_VERSION', supportsHttpsTrafficOnly: 'STORAGE_ACCOUNT_HTTPS_ONLY',
+                  allowBlobPublicAccess: 'STORAGE_ACCOUNT_ALLOW_BLOB_PUBLIC_ACCESS', allowSharedKeyAccess: 'STORAGE_ACCOUNT_ALLOW_SHARED_KEY_ACCESS',
+                  publicNetworkAccess: 'STORAGE_ACCOUNT_PUBLIC_NETWORK_ACCESS', containerNames: 'STORAGE_ACCOUNT_CONTAINER_NAMES',
+                  blobServiceName: 'STORAGE_ACCOUNT_BLOB_SERVICE_NAME', containerPublicAccess: 'STORAGE_ACCOUNT_CONTAINER_PUBLIC_ACCESS', tags: 'RESOURCE_TAGS' } },
+              { key: 'sqlDatabase', label: 'Azure SQL Database', short: 'sql',
+                template: 'modules/database/sql.bicep', type: 'Microsoft.Sql/servers', requires: ['resourceGroup'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { administratorLogin: 'AZURE_SQL_ADMIN_USERNAME', sqlServerVersion: 'AZURE_SQL_VERSION', databaseSkuName: 'AZURE_SQL_SKU',
+                  databaseSkuTier: 'AZURE_SQL_TIER', databaseCapacity: 'AZURE_SQL_CAPACITY', databaseMaxSizeGB: 'AZURE_SQL_MAX_SIZE_GB',
+                  publicNetworkAccess: 'AZURE_SQL_PUBLIC_NETWORK_ACCESS', minimumTlsVersion: 'AZURE_SQL_MIN_TLS_VERSION', tags: 'RESOURCE_TAGS' },
+                secrets: { administratorLoginPassword: 'SQL_ADMIN_PASSWORD' } },
+              { key: 'openAi', label: 'Azure OpenAI', short: 'oai',
+                template: 'modules/ai/openai.bicep', type: 'Microsoft.CognitiveServices/accounts', requires: ['resourceGroup'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { skuName: 'AZURE_OPENAI_SKU', publicNetworkAccess: 'AZURE_OPENAI_PUBLIC_NETWORK_ACCESS', tags: 'RESOURCE_TAGS' } },
+              { key: 'vmWindows', label: 'VM - Windows', short: 'vmwin', moduleSuffix: ' (windows)',
+                template: 'modules/compute/vm.bicep', type: 'Microsoft.Compute/virtualMachines', requires: ['subnet'],
+                values: { vmType: 'windows', ...tok('environmentName', 'workload', 'systemName', 'location', 'purpose') },
+                variables: vmVars('VM_WINDOWS_IMAGE', 'VM_WINDOWS_SIZE'),
+                secrets: { vmAdminPassword: 'VM_ADMIN_PASSWORD' } },
+              { key: 'vmLinux', label: 'VM - Linux', short: 'vmlnx', moduleSuffix: ' (linux)',
+                template: 'modules/compute/vm.bicep', type: 'Microsoft.Compute/virtualMachines', requires: ['subnet'],
+                values: { vmType: 'linux', ...tok('environmentName', 'workload', 'systemName', 'location', 'purpose') },
+                variables: vmVars('VM_LINUX_IMAGE', 'VM_LINUX_SIZE'),
+                secrets: { vmAdminPassword: 'VM_ADMIN_PASSWORD' } },
+              { key: 'vmWindowsSql', label: 'VM - Windows with SQL image', short: 'vmsql', moduleSuffix: ' (windows-sql)',
+                template: 'modules/compute/vm.bicep', type: 'Microsoft.Compute/virtualMachines', requires: ['subnet'],
+                values: { vmType: 'windows-sql', ...tok('environmentName', 'workload', 'systemName', 'location', 'purpose') },
+                variables: vmVars('VM_WINDOWS_SQL_IMAGE', 'VM_WINDOWS_SQL_SIZE'),
+                secrets: { vmAdminPassword: 'VM_ADMIN_PASSWORD' } },
+              { key: 'postgresql', label: 'PostgreSQL Flexible Server', short: 'psql',
+                template: 'modules/database/postgresql.bicep', type: 'Microsoft.DBforPostgreSQL/flexibleServers', requires: ['virtualNetwork'],
+                values: tok('environmentName', 'workload', 'location', 'purpose'),
+                variables: { administratorLogin: 'POSTGRESQL_ADMIN_USERNAME', version: 'POSTGRESQL_VERSION', skuName: 'POSTGRESQL_SKU',
+                  skuTier: 'POSTGRESQL_TIER', storageSizeGB: 'POSTGRESQL_STORAGE_SIZE_GB', backupRetentionDays: 'POSTGRESQL_BACKUP_RETENTION_DAYS',
+                  geoRedundantBackup: 'POSTGRESQL_GEO_REDUNDANT_BACKUP', highAvailabilityMode: 'POSTGRESQL_HA_MODE',
+                  subnetAddressPrefix: 'POSTGRESQL_SUBNET_ADDRESS_PREFIX', privateDnsZoneName: 'POSTGRESQL_PRIVATE_DNS_ZONE_NAME', tags: 'RESOURCE_TAGS' },
+                secrets: { administratorLoginPassword: 'POSTGRESQL_ADMIN_PASSWORD' } }
+            ];
+
+            // Self-check: every prerequisite must come earlier in the catalogue.
+            const position = Object.fromEntries(CATALOG.map((c, i) => [c.key, i]));
+            for (const c of CATALOG) for (const d of [...c.requires, ...(c.after || [])]) {
+              if (!(d in position) || position[d] >= position[c.key]) { core.setFailed(`Workflow catalogue error: ${d} must be listed before ${c.key}.`); return; }
+            }
+
+            // Selected resources plus every prerequisite they need (transitively).
+            const reason = {};
+            for (const c of CATALOG) if (targets[c.key] === 'yes') reason[c.key] = 'Requested in input.json';
+            let added = true;
+            while (added) {
+              added = false;
+              for (const c of CATALOG) if (reason[c.key]) for (const d of c.requires) {
+                if (!reason[d]) { reason[d] = `Prerequisite of ${c.key} (added automatically)`; added = true; }
+              }
+            }
+
+            const runId = context.runId, attempt = process.env.GITHUB_RUN_ATTEMPT || '1';
+            const plan = CATALOG.filter(c => reason[c.key]).map(c => {
+              const auto = targets[c.key] !== 'yes';
+              return {
+                key: c.key, label: c.label, template: c.template, scope: c.scope || 'resourceGroup',
+                type: c.type, moduleName: c.template + (c.moduleSuffix || ''),
+                deploymentName: `pike-${c.short}-${runId}-${attempt}`,
+                values: c.values, variables: c.variables, secrets: c.secrets || {},
+                // Auto-added prerequisites are only created when missing (the resource group is always applied).
+                skipIfExistsType: (c.alwaysSkipIfExists || (auto && c.key !== 'resourceGroup')) ? c.type : '',
+                expectedName: c.expectedName || '',
+                dependsOn: [...c.requires, ...(c.after || []).filter(d => reason[d])],
+                reason: reason[c.key], autoAdded: auto
+              };
+            });
+
+            core.setOutput('deploy-plan', JSON.stringify(plan));
+            core.setOutput('deploy-count', String(plan.length));
+
+            for (const p of plan) if (p.autoAdded) core.notice(`${p.label} added to the plan: ${p.reason}.`);
+            const rows = plan.map((p, i) => `| ${i + 1} | ${p.label} | \`${p.moduleName}\` | ${p.reason}${p.skipIfExistsType ? ' - created only if missing' : ''} |`);
+            const accessRows = ACCESS.filter(k => access[k] === 'yes').map(k => `- ${k.toUpperCase()} request (runs after the deployment plan)`);
+            await core.summary.addRaw(
+              `## Deployment plan (${environment})\n\nWorkload \`${workload}\` · system \`${system}\` · purpose \`${purpose}\` · region \`${location}\`\n\n` +
+              (plan.length ? `Deployed one at a time, in this order:\n\n| # | Resource | Module | Why |\n|---|---|---|---|\n${rows.join('\n')}\n` : 'No resources are selected in input.json.\n') +
+              (accessRows.length ? `\n**Access requests**\n\n${accessRows.join('\n')}\n` : '')
+            ).write();
+
+  context:
+    name: Azure login and environment context
+    runs-on: [self-hosted, X64, Windows]
+    needs: plan
+    environment: ${{ needs.plan.outputs.environment }}
+    outputs:
+      resource-group: ${{ steps.context.outputs.resource-group }}
+    steps:
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify subscription and resolve resource group name
+        id: context
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ENVIRONMENT_NAME: ${{ needs.plan.outputs.environment }}
+          TARGET_WORKLOAD: ${{ needs.plan.outputs.workload }}
+          TARGET_LOCATION: ${{ needs.plan.outputs.location }}
+          RESOURCE_TAGS: ${{ vars.RESOURCE_TAGS }}
+        with:
+          script: |
+            const r = await exec.getExecOutput('az', ['account', 'show', '--query', 'id', '-o', 'tsv'], { ignoreReturnCode: true, silent: true });
+            if (r.exitCode !== 0) { core.setFailed('Unable to read the signed-in Azure subscription.'); return; }
+            if (r.stdout.trim().toLowerCase() !== String(process.env.EXPECTED_SUBSCRIPTION).trim().toLowerCase()) {
+              core.setFailed('The signed-in subscription does not match AZURE_SUBSCRIPTION_ID for this environment.'); return;
+            }
+            core.info('Azure subscription verified (value not printed).');
+
+            // Pike naming sheet: <workload> = int-<system>-<entity> | app-<name> | platform-svc | shared-infra
+            const workload = String(process.env.TARGET_WORKLOAD || '').trim();
+            if (!/^(int-[a-z0-9]+-[a-z0-9]+(-[a-z0-9]+)*|app-[a-z0-9]+(-[a-z0-9]+)*|platform-svc|shared-infra)$/.test(workload)) {
+              core.setFailed(`input.json target.workload must be int-<system>-<entity>, app-<name>, platform-svc or shared-infra in lowercase (found "${workload}").`); return;
+            }
+            if (!String(process.env.TARGET_LOCATION || '').trim()) { core.setFailed('input.json target.location is empty.'); return; }
+
+            // Pike naming sheet: required tags are env, workload, owner, cost-center, data-class.
+            // env and workload are added by every module; the other three must be in RESOURCE_TAGS.
+            let tags;
+            try { tags = JSON.parse(process.env.RESOURCE_TAGS || ''); } catch { core.setFailed('RESOURCE_TAGS must be a JSON object, for example {"owner":"...","cost-center":"...","data-class":"..."}.'); return; }
+            const missingTags = ['owner', 'cost-center', 'data-class'].filter(k => !String(tags?.[k] ?? '').trim());
+            if (missingTags.length) { core.setFailed(`RESOURCE_TAGS is missing required tag(s): ${missingTags.join(', ')}.`); return; }
+
+            // Same pattern as modules/RG/resourcegroup.bicep (rg-<workload>-<env>); the resource group entry verifies they match.
+            const rg = `rg-${workload}-${process.env.ENVIRONMENT_NAME}`;
+            core.info(`Target resource group: ${rg}`);
+            core.setOutput('resource-group', rg);
+
+  deploy:
+    name: Deploy resources (sequential plan)
+    runs-on: [self-hosted, X64, Windows]
+    needs: [plan, context]
+    if: ${{ !cancelled() && needs.context.result == 'success' && needs.plan.outputs.deploy-count != '0' }}
+    environment: ${{ needs.plan.outputs.environment }}
+    outputs:
+      results-json: ${{ steps.deploy.outputs.results-json }}
+      failed-keys: ${{ steps.deploy.outputs.failed-keys }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # Walks the plan in order. Each entry is validated, previewed with What-If and deployed
+      # before the next one starts. The OIDC login is refreshed before every entry.
+      - id: deploy
+        uses: ./.github/actions/deploy-bicep
+        with:
+          plan: ${{ needs.plan.outputs.deploy-plan }}
+          resource-group: ${{ needs.context.outputs.resource-group }}
+          location: ${{ needs.plan.outputs.location }}
+          vars-json: ${{ toJSON(vars) }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # Secrets by name; a plan entry only uses the ones its module needs.
+          secure-values: |
+            SQL_ADMIN_PASSWORD=${{ secrets.SQL_ADMIN_PASSWORD }}
+            VM_ADMIN_PASSWORD=${{ secrets.VM_ADMIN_PASSWORD }}
+            POSTGRESQL_ADMIN_PASSWORD=${{ secrets.POSTGRESQL_ADMIN_PASSWORD }}
+
+  access-management:
+    name: Access management (RBAC / PIM)
+    needs: [plan, context, deploy]
+    # Runs after the deployment plan. Blocked only when the resource group entry failed, or the
+    # deploy job stopped before it produced any result.
+    if: ${{ !cancelled() && needs.context.result == 'success' && (needs.plan.outputs.rbac == 'yes' || needs.plan.outputs.pim == 'yes') && (needs.deploy.result == 'skipped' || needs.deploy.outputs.results-json != '') && !contains(needs.deploy.outputs.failed-keys, 'resourceGroup') }}
+    uses: ./.github/workflows/access.yml
+    with:
+      environment: ${{ needs.plan.outputs.environment }}
+      resource-group: ${{ needs.context.outputs.resource-group }}
+      rbac: ${{ needs.plan.outputs.rbac }}
+      pim: ${{ needs.plan.outputs.pim }}
+      rbac-requestor-email: ${{ needs.plan.outputs.rbac-requestor-email }}
+      pim-requestor-email: ${{ needs.plan.outputs.pim-requestor-email }}
+      location: ${{ needs.plan.outputs.location }}
+    secrets: inherit
+
+  inventory:
+    name: Deployment inventory CSV
+    runs-on: [self-hosted, X64, Windows]
+    needs: [plan, context, deploy, access-management]
+    if: ${{ always() }}
+    steps:
+      - name: Build CSV from the plan results
+        uses: actions/github-script@v7
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const fs = require('fs');
+            const needs = JSON.parse(process.env.NEEDS_JSON || '{}');
+            const planOut = needs.plan?.outputs || {};
+            const environment = planOut.environment || '';
+            const resourceGroup = needs.context?.outputs?.['resource-group'] || '';
+            const runId = String(context.runId);
+            const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+
+            let plan = [], results = [];
+            try { plan = JSON.parse(planOut['deploy-plan'] || '[]'); } catch { plan = []; }
+            try { results = JSON.parse(needs.deploy?.outputs?.['results-json'] || '[]'); } catch { results = []; }
+            const resultByKey = Object.fromEntries(results.map(r => [r.key, r]));
+
+            const J = (v) => (v === undefined || v === null) ? '' : (typeof v === 'string' ? v : JSON.stringify(v));
+            const vmReport = p => ({ sku: J(p.vmSize), size: p.osDiskSizeGB !== undefined ? `OS disk ${p.osDiskSizeGB} GB ${p.osDiskStorageAccountType}` : '', image: J(p.imageReference), public: 'Private NIC only' });
+            const REPORT = {
+              resourceGroup: p => ({}),
+              networkSecurityGroup: p => ({}),
+              routeTable: p => ({}),
+              virtualNetwork: p => ({ size: J(p.addressPrefixes) }),
+              subnet: p => ({ size: J(p.addressPrefix) }),
+              applicationGatewaySubnet: p => ({ size: J(p.subnetAddressPrefix) }),
+              loadBalancer: p => ({ sku: J(p.skuName), size: J(p.skuTier) }),
+              applicationGateway: p => ({ sku: J(p.skuName), size: p.minCapacity !== undefined ? `autoscale ${p.minCapacity}-${p.maxCapacity}` : '', public: 'Public + private frontends' }),
+              keyVault: p => ({ sku: J(p.skuName), public: J(p.publicNetworkAccess) }),
+              storageAccount: p => ({ sku: J(p.skuName), size: p.kind ? `${p.kind} / ${p.accessTier}` : '', public: J(p.publicNetworkAccess) }),
+              sqlDatabase: p => ({ sku: J(p.databaseSkuName), size: p.databaseSkuTier ? `${p.databaseSkuTier} / capacity ${p.databaseCapacity} / ${p.databaseMaxSizeGB} GB` : '', image: p.sqlServerVersion ? `SQL ${p.sqlServerVersion}` : '', public: J(p.publicNetworkAccess) }),
+              openAi: p => ({ sku: J(p.skuName), public: J(p.publicNetworkAccess) }),
+              vmWindows: vmReport, vmLinux: vmReport, vmWindowsSql: vmReport,
+              postgresql: p => ({ sku: J(p.skuName), size: p.skuTier ? `${p.skuTier} / ${p.storageSizeGB} GB` : '', image: p.version ? `PostgreSQL ${p.version}` : '', public: 'Disabled (VNet integration)' })
+            };
+
+            const deployJob = needs.deploy;
+            const statusOf = (r) => {
+              if (r) return [r.status, r.error || ''];
+              if (!deployJob || deployJob.result === 'skipped') return ['Skipped', 'Deploy job did not run (input validation or the environment context job failed).'];
+              if (deployJob.result === 'cancelled') return ['Cancelled', 'Run was cancelled.'];
+              return ['NotRun', 'Not attempted: the deploy job stopped before this entry (for example Azure login failed). See the deploy job log.'];
+            };
+
+            const rows = [];
+            for (const e of plan) {
+              const r = resultByKey[e.key];
+              const [status, error] = statusOf(r);
+              const params = r?.parameters || {};
+              const rep = (REPORT[e.key] || (() => ({})))(params);
+              rows.push({
+                run_id: runId, timestamp_utc: now, environment, subscription_id: '',
+                resource_type: e.type, module_name: e.moduleName, resource_name: r?.resourceName || '',
+                resource_group: e.key === 'resourceGroup' ? (r?.resourceName || resourceGroup) : resourceGroup,
+                location: J(params.location), sku: rep.sku || '', size_or_tier: rep.size || '', image_or_runtime: rep.image || '',
+                public_access: rep.public || '', deployment_status: status, resource_id: r?.resourceId || '', error_summary: error,
+                plan_reason: e.reason || ''
+              });
+            }
+
+            const access = needs['access-management'];
+            for (const [key, label, type] of [['rbac', 'RBAC role assignment', 'Microsoft.Authorization/roleAssignments'], ['pim', 'PIM eligibility request', 'Microsoft.Authorization/roleEligibilityScheduleRequests']]) {
+              if (planOut[key] !== 'yes') continue;
+              let status, error;
+              if (!access || access.result === 'skipped') { status = 'Skipped'; error = 'Access management did not run (prerequisite not met).'; }
+              else if (access.result === 'cancelled') { status = 'Cancelled'; error = 'Run was cancelled.'; }
+              else { status = access.outputs?.[`${key}-status`] || 'Failed'; error = access.outputs?.[`${key}-error`] || (status === 'Failed' ? 'See the access-management job log.' : ''); }
+              rows.push({
+                run_id: runId, timestamp_utc: now, environment, subscription_id: '',
+                resource_type: type, module_name: label, resource_name: access?.outputs?.[`${key}-name`] || '',
+                resource_group: resourceGroup, location: '', sku: '', size_or_tier: '', image_or_runtime: '', public_access: '',
+                deployment_status: status, resource_id: access?.outputs?.[`${key}-id`] || '', error_summary: error,
+                plan_reason: 'Requested in input.json'
+              });
+            }
+
+            const columns = ['run_id', 'timestamp_utc', 'environment', 'subscription_id', 'resource_type', 'module_name', 'resource_name',
+              'resource_group', 'location', 'sku', 'size_or_tier', 'image_or_runtime', 'public_access', 'deployment_status', 'resource_id', 'error_summary', 'plan_reason'];
+            const esc = (v) => '"' + String(v ?? '').replace(/\/subscriptions\/[0-9a-fA-F-]{36}/g, '/subscriptions/***').replace(/"/g, '""') + '"';
+            const csv = [columns.map(esc).join(','), ...rows.map(r => columns.map(c => esc(r[c])).join(','))].join('\r\n') + '\r\n';
+            fs.mkdirSync('artifacts', { recursive: true });
+            const file = `artifacts/deployment-inventory-${runId}.csv`;
+            fs.writeFileSync(file, csv, 'utf8');
+            core.info(`Wrote ${file} with ${rows.length} row(s).`);
+
+            const md = rows.map(r => `| ${r.module_name} | \`${r.resource_name}\` | ${r.deployment_status} | ${r.plan_reason} | ${r.error_summary.replace(/\|/g, '/')} |`);
+            await core.summary.addRaw(`## Deployment inventory\n\n| Module | Resource | Status | Why in plan | Detail |\n|---|---|---|---|---|\n${md.join('\n')}\n`).write();
+
+      - name: Upload deployment inventory CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PIKE-Deployment-Inventory-${{ github.run_id }}
+          path: artifacts/deployment-inventory-${{ github.run_id }}.csv
+          if-no-files-found: warn
+          retention-days: 30
+          overwrite: true

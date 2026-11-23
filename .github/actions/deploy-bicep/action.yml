@@ -1,0 +1,420 @@
+name: Deploy existing Bicep module
+description: >
+  Maps GitHub Environment variables, workflow values and secrets onto the parameters of an
+  existing Bicep module, validates them against the module's parameter contract (type and
+  allowed values), runs What-If and then deploys. Uses the Azure CLI session created by
+  azure/login. No PowerShell and no repository scripts are used.
+
+  Two modes:
+  - Single module (template + deployment-name + values/variables/secure-values). Used by access.yml.
+  - Plan (plan = JSON array built by deploy.yml). Every entry is deployed one after another, in
+    the given order. An entry whose prerequisite failed is skipped; independent entries continue.
+
+inputs:
+  plan:
+    description: >
+      Plan mode. JSON array of entries
+      {key, label, template, scope, deploymentName, values, variables, secrets, skipIfExistsType,
+      expectedName, dependsOn}. "secrets" maps a module parameter to a secret NAME supplied
+      through secure-values (NAME=value lines).
+    required: false
+    default: ''
+  template:
+    description: Single mode. Path of the existing Bicep module.
+    required: false
+    default: ''
+  scope:
+    description: Single mode. resourceGroup or subscription.
+    required: false
+    default: resourceGroup
+  resource-group:
+    description: Target resource group (resourceGroup scope; default for every plan entry).
+    required: false
+    default: ''
+  location:
+    description: Deployment location (subscription scope; default for every plan entry).
+    required: false
+    default: ''
+  deployment-name:
+    description: Single mode. Azure deployment name.
+    required: false
+    default: ''
+  variables:
+    description: Single mode. One mapping per line, moduleParameter=GITHUB_VARIABLE_NAME.
+    required: false
+    default: ''
+  values:
+    description: Single mode. One mapping per line, moduleParameter=value (values computed by the workflow).
+    required: false
+    default: ''
+  secure-values:
+    description: >
+      Single mode: one mapping per line, moduleParameter=secret value.
+      Plan mode: one secret per line, SECRET_NAME=secret value.
+    required: false
+    default: ''
+  vars-json:
+    description: Pass toJSON(vars) so variables can be resolved by name.
+    required: true
+  skip-if-exists-type:
+    description: Single mode. Resource type; when What-If shows it already exists, the deployment is skipped.
+    required: false
+    default: ''
+  expected-name:
+    description: Single mode. When set, the deployed resource name must equal this value.
+    required: false
+    default: ''
+  azure-client-id:
+    description: Plan mode, optional. With tenant and subscription, the OIDC login is refreshed before each entry so long plans do not outlive the Azure CLI token.
+    required: false
+    default: ''
+  azure-tenant-id:
+    description: Plan mode, optional. See azure-client-id.
+    required: false
+    default: ''
+  azure-subscription-id:
+    description: Plan mode, optional. See azure-client-id.
+    required: false
+    default: ''
+
+outputs:
+  status:
+    description: Single mode. Succeeded, Skipped or Failed.
+    value: ${{ steps.deploy.outputs.status }}
+  resource-name:
+    description: Single mode. Name returned by the module (deployedResourceName output).
+    value: ${{ steps.deploy.outputs.resource-name }}
+  resource-id:
+    description: Single mode. Resource ID returned by the module, with the subscription ID redacted.
+    value: ${{ steps.deploy.outputs.resource-id }}
+  parameters-json:
+    description: Single mode. Non-secret parameter values used for the deployment.
+    value: ${{ steps.deploy.outputs.parameters-json }}
+  error:
+    description: Single mode. Error summary when the deployment failed.
+    value: ${{ steps.deploy.outputs.error }}
+  results-json:
+    description: Plan mode. JSON array with one result per plan entry, in plan order.
+    value: ${{ steps.deploy.outputs.results-json }}
+  failed-keys:
+    description: Plan mode. Comma-separated keys of entries that failed or were blocked by a failed prerequisite.
+    value: ${{ steps.deploy.outputs.failed-keys }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate parameters, What-If and deploy
+      id: deploy
+      uses: actions/github-script@v7
+      env:
+        IN_PLAN: ${{ inputs.plan }}
+        IN_TEMPLATE: ${{ inputs.template }}
+        IN_SCOPE: ${{ inputs.scope }}
+        IN_RG: ${{ inputs.resource-group }}
+        IN_LOCATION: ${{ inputs.location }}
+        IN_NAME: ${{ inputs.deployment-name }}
+        IN_VARIABLES: ${{ inputs.variables }}
+        IN_VALUES: ${{ inputs.values }}
+        IN_SECURE: ${{ inputs.secure-values }}
+        IN_VARS_JSON: ${{ inputs.vars-json }}
+        IN_SKIP_TYPE: ${{ inputs.skip-if-exists-type }}
+        IN_EXPECTED_NAME: ${{ inputs.expected-name }}
+        IN_CLIENT_ID: ${{ inputs.azure-client-id }}
+        IN_TENANT_ID: ${{ inputs.azure-tenant-id }}
+        IN_SUBSCRIPTION_ID: ${{ inputs.azure-subscription-id }}
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          const crypto = require('crypto');
+          const E = process.env;
+          const secrets = [];
+          const hide = (v) => { if (v) { core.setSecret(v); secrets.push(v); } };
+          for (const v of [E.IN_CLIENT_ID, E.IN_TENANT_ID, E.IN_SUBSCRIPTION_ID]) hide(v);
+
+          const redact = (text) => {
+            let t = String(text ?? '');
+            for (const s of secrets) if (s && s.length >= 4) t = t.split(s).join('***');
+            return t.replace(/\/subscriptions\/[0-9a-fA-F-]{36}/g, '/subscriptions/***');
+          };
+          const summarize = (text, max = 800) => {
+            const t = redact(text).replace(/\s+/g, ' ').trim();
+            return t.length > max ? t.slice(0, max) + '...' : t;
+          };
+          const parseLines = (text, label, hidden) => {
+            const map = {};
+            for (const raw of String(text || '').split(/\r?\n/)) {
+              const line = raw.trim();
+              if (!line || line.startsWith('#')) continue;
+              const i = line.indexOf('=');
+              if (i < 1) throw new Error(`Invalid line in '${label}' (expected name=...)${hidden ? '' : ': ' + line}`);
+              map[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+            }
+            return map;
+          };
+          const az = (args) => exec.getExecOutput('az', args, { ignoreReturnCode: true, silent: true });
+
+          // Resource type of an ARM resource ID, e.g. .../providers/Microsoft.Network/virtualNetworks/v/subnets/s
+          // -> microsoft.network/virtualnetworks/subnets. A resource group ID -> microsoft.resources/resourcegroups.
+          const typeOf = (id) => {
+            const s = String(id || '');
+            const i = s.toLowerCase().lastIndexOf('/providers/');
+            if (i < 0) return /\/resourcegroups\/[^/]+$/i.test(s) ? 'microsoft.resources/resourcegroups' : '';
+            const parts = s.slice(i + '/providers/'.length).split('/');
+            const segs = [parts[0]];
+            for (let k = 1; k < parts.length; k += 2) segs.push(parts[k]);
+            return segs.join('/').toLowerCase();
+          };
+
+          const vars = JSON.parse(E.IN_VARS_JSON || '{}');
+          const contracts = {};
+
+          // Deploys one module. Never throws; returns a result object.
+          async function deployOne(entry) {
+            const template = entry.template;
+            const scope = entry.scope === 'subscription' ? 'subscription' : 'resourceGroup';
+            const rg = entry.resourceGroup || E.IN_RG;
+            const location = entry.location || E.IN_LOCATION;
+            const result = { key: entry.key || template, status: 'Failed', resourceName: '', resourceId: '', parameters: {}, error: '' };
+            let paramFile = '';
+            try {
+              if (!template || !fs.existsSync(template)) throw new Error(`Module '${template}' does not exist in the repository.`);
+              if (!entry.deploymentName) throw new Error('A deployment name is required.');
+              if (scope === 'resourceGroup' && !rg) throw new Error('resource-group is required for a resource group deployment.');
+              if (scope === 'subscription' && !location) throw new Error('location is required for a subscription deployment (set target.location in input.json).');
+
+              // 1. Read the module's parameter contract.
+              if (!contracts[template]) {
+                const build = await az(['bicep', 'build', '--file', template, '--stdout']);
+                if (build.exitCode !== 0) throw new Error(`Bicep build failed for ${template}: ${build.stderr}`);
+                contracts[template] = JSON.parse(build.stdout).parameters || {};
+              }
+              const contract = contracts[template];
+
+              // 2. Resolve values: workflow values, GitHub Environment variables, secrets.
+              const resolved = {}, source = {}, mapped = new Set(), errors = [];
+              for (const [p, v] of Object.entries(entry.values || {})) {
+                mapped.add(p); resolved[p] = String(v); source[p] = 'workflow value';
+              }
+              for (const [p, name] of Object.entries(entry.variables || {})) {
+                mapped.add(p);
+                const v = vars[name];
+                if (v === undefined || v === null || String(v).trim() === '') {
+                  errors.push(`GitHub Environment variable '${name}' (module parameter '${p}') is not defined in this environment.`);
+                  continue;
+                }
+                resolved[p] = String(v).trim(); source[p] = `vars.${name}`;
+              }
+              const secureParams = new Set();
+              for (const [p, v] of Object.entries(entry.secureValues || {})) {
+                mapped.add(p); secureParams.add(p);
+                if (!v) { errors.push(`The secret ${entry.secretNames?.[p] ? `'${entry.secretNames[p]}' ` : ''}mapped to module parameter '${p}' is empty or not defined in this GitHub Environment.`); continue; }
+                resolved[p] = v; source[p] = 'secret';
+              }
+
+              // 3. Validate against the module contract and convert types.
+              const params = {}, report = {};
+              for (const [p, raw] of Object.entries(resolved)) {
+                const def = contract[p];
+                if (!def) { errors.push(`'${p}' (${source[p]}) is not a parameter of ${template}.`); continue; }
+                const type = String(def.type || '').toLowerCase();
+                let value;
+                try {
+                  if (type === 'int') {
+                    if (!/^-?\d+$/.test(raw)) throw new Error('expected a whole number');
+                    value = parseInt(raw, 10);
+                  } else if (type === 'bool') {
+                    if (!/^(true|false)$/i.test(raw)) throw new Error('expected true or false');
+                    value = raw.toLowerCase() === 'true';
+                  } else if (type === 'array' || type === 'object' || type === 'secureobject') {
+                    value = JSON.parse(raw);
+                    if (type === 'array' && !Array.isArray(value)) throw new Error('expected a JSON array, for example ["a","b"]');
+                    if (type !== 'array' && (value === null || typeof value !== 'object' || Array.isArray(value))) throw new Error('expected a JSON object');
+                  } else {
+                    value = raw;
+                  }
+                } catch (err) {
+                  errors.push(`Value for '${p}' (${source[p]}) is invalid: ${err.message}.`);
+                  continue;
+                }
+                if (Array.isArray(def.allowedValues) && type !== 'array' && !def.allowedValues.includes(value)) {
+                  const shown = secureParams.has(p) ? '' : ` Found '${raw}'.`;
+                  errors.push(`Value for '${p}' (${source[p]}) must be one of: ${def.allowedValues.map(String).join(', ')}.${shown}`);
+                  continue;
+                }
+                params[p] = { value };
+                if (!secureParams.has(p) && !String(type).startsWith('secure')) report[p] = value;
+              }
+              for (const [p, def] of Object.entries(contract)) {
+                if (!mapped.has(p) && !('defaultValue' in def)) errors.push(`Required parameter '${p}' of ${template} is not mapped in the workflow.`);
+              }
+
+              // Pike naming format: tokens are lowercase letters/digits separated by single hyphens.
+              const TOKENS = ['environmentName', 'workload', 'purpose', 'systemName'];
+              const tokenRe = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+              for (const p of TOKENS) {
+                if (p in resolved && resolved[p] !== '' && !tokenRe.test(resolved[p])) {
+                  errors.push(`Naming token '${p}' (${source[p]}) must be lowercase letters/digits and single hyphens (found '${resolved[p]}').`);
+                }
+              }
+              if (/storageAccount\.bicep$/i.test(template) && 'purpose' in resolved && !/^[a-z0-9]+$/.test(resolved.purpose)) {
+                errors.push(`Storage account purpose (${source.purpose}) must be lowercase letters and digits only - no spaces, no hyphens, no uppercase (found '${resolved.purpose}').`);
+              }
+              if (errors.length) throw new Error('Parameter validation failed:\n- ' + errors.join('\n- '));
+
+              result.parameters = report;
+              core.startGroup(`Parameters (non-secret): ${template}`);
+              for (const [p, v] of Object.entries(report)) core.info(`${p} = ${typeof v === 'string' ? v : JSON.stringify(v)}   [${source[p]}]`);
+              core.endGroup();
+
+              // 4. Parameters file (deleted in finally).
+              paramFile = path.join(E.RUNNER_TEMP, `pike-params-${crypto.randomUUID()}.json`);
+              fs.writeFileSync(paramFile, JSON.stringify({
+                $schema: 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#',
+                contentVersion: '1.0.0.0',
+                parameters: params
+              }));
+
+              const base = scope === 'subscription' ? ['deployment', 'sub'] : ['deployment', 'group'];
+              const where = scope === 'subscription' ? ['--location', location] : ['--resource-group', rg];
+              const common = ['--name', entry.deploymentName, '--template-file', template, '--parameters', `@${paramFile}`];
+
+              // 5. What-If.
+              core.info(`What-If: ${template} -> ${scope === 'subscription' ? 'subscription' : rg}`);
+              const whatIf = await az([...base, 'what-if', ...where, ...common, '--no-pretty-print', '--output', 'json']);
+              if (whatIf.exitCode !== 0) throw new Error(`What-If failed: ${whatIf.stderr || whatIf.stdout}`);
+              const changes = (JSON.parse(whatIf.stdout || '{}').changes) || [];
+              for (const c of changes) core.info(`  ${String(c.changeType).padEnd(10)} ${redact(c.resourceId)}`);
+
+              // 6. Skip when the resource already exists (Ignore = exists but not in this template, so not ours).
+              if (entry.skipIfExistsType) {
+                const wanted = entry.skipIfExistsType.toLowerCase();
+                const existing = changes.find(c => typeOf(c.resourceId) === wanted && !['Create', 'Ignore'].includes(c.changeType));
+                if (existing) {
+                  const id = String(existing.resourceId);
+                  core.info(`${entry.skipIfExistsType} already exists; template not re-applied (protects existing configuration).`);
+                  result.status = 'Skipped';
+                  result.resourceId = redact(id);
+                  result.resourceName = id.split('/').pop();
+                  result.error = 'Already exists; template not re-applied.';
+                  return result;
+                }
+              }
+
+              // 7. Deploy.
+              const deploy = await az([...base, 'create', ...where, ...common, '--output', 'json']);
+              if (deploy.exitCode !== 0) throw new Error(`Deployment failed: ${deploy.stderr || deploy.stdout}`);
+              const outputs = JSON.parse(deploy.stdout)?.properties?.outputs || {};
+              const name = outputs.deployedResourceName?.value || '';
+              const id = outputs.deployedResourceId?.value || '';
+              if (entry.expectedName && name !== entry.expectedName) {
+                throw new Error(`Module produced name '${name}' but the workflow expected '${entry.expectedName}'. Naming tokens are inconsistent.`);
+              }
+              core.info(`Deployed ${name}`);
+              result.status = 'Succeeded';
+              result.resourceName = name;
+              result.resourceId = redact(id);
+              result.error = '';
+              return result;
+            } catch (err) {
+              result.status = 'Failed';
+              result.error = summarize(err.message);
+              core.error(`${entry.label || template}: ${redact(err.message)}`);
+              return result;
+            } finally {
+              if (paramFile && fs.existsSync(paramFile)) fs.unlinkSync(paramFile);
+            }
+          }
+
+          // ---------------- Single module mode (access.yml) ----------------
+          if (!String(E.IN_PLAN || '').trim()) {
+            core.setOutput('status', 'Failed');
+            let entry;
+            try {
+              const secure = parseLines(E.IN_SECURE, 'secure-values', true);
+              for (const v of Object.values(secure)) hide(v);
+              entry = {
+                template: E.IN_TEMPLATE, scope: E.IN_SCOPE, deploymentName: E.IN_NAME,
+                values: parseLines(E.IN_VALUES, 'values'), variables: parseLines(E.IN_VARIABLES, 'variables'),
+                secureValues: secure, skipIfExistsType: E.IN_SKIP_TYPE, expectedName: E.IN_EXPECTED_NAME
+              };
+            } catch (err) {
+              core.setOutput('error', summarize(err.message));
+              core.setFailed(redact(err.message));
+              return;
+            }
+            const r = await deployOne(entry);
+            core.setOutput('status', r.status);
+            core.setOutput('resource-name', r.resourceName);
+            core.setOutput('resource-id', r.resourceId);
+            core.setOutput('parameters-json', JSON.stringify(r.parameters));
+            core.setOutput('error', r.error);
+            if (r.status === 'Failed') core.setFailed(r.error);
+            return;
+          }
+
+          // ---------------- Plan mode (deploy.yml) ----------------
+          let plan, secretPool;
+          try {
+            plan = JSON.parse(E.IN_PLAN);
+            if (!Array.isArray(plan)) throw new Error('plan must be a JSON array.');
+            secretPool = parseLines(E.IN_SECURE, 'secure-values', true);
+            for (const v of Object.values(secretPool)) hide(v);
+          } catch (err) {
+            core.setOutput('results-json', '[]');
+            core.setFailed(`Invalid deployment plan: ${redact(err.message)}`);
+            return;
+          }
+
+          const refreshLogin = async () => {
+            if (!E.IN_CLIENT_ID || !E.IN_TENANT_ID || !E.IN_SUBSCRIPTION_ID) return;
+            const token = await core.getIDToken('api://AzureADTokenExchange');
+            hide(token);
+            const login = await az(['login', '--service-principal', '--username', E.IN_CLIENT_ID, '--tenant', E.IN_TENANT_ID,
+              '--federated-token', token, '--allow-no-subscriptions', '--output', 'none']);
+            if (login.exitCode !== 0) throw new Error(`Azure OIDC login refresh failed: ${summarize(login.stderr)}`);
+            const set = await az(['account', 'set', '--subscription', E.IN_SUBSCRIPTION_ID]);
+            if (set.exitCode !== 0) throw new Error('Could not select the environment subscription after the login refresh.');
+          };
+
+          const results = [], byKey = {};
+          const publish = () => {
+            core.setOutput('results-json', JSON.stringify(results));
+            core.setOutput('failed-keys', results.filter(r => r.status === 'Failed' || r.blocked).map(r => r.key).join(','));
+          };
+          publish();
+
+          for (let i = 0; i < plan.length; i++) {
+            const entry = plan[i];
+            core.info(`\n========== [${i + 1}/${plan.length}] ${entry.label || entry.key} ==========`);
+            const badPrereqs = (entry.dependsOn || []).filter(d => byKey[d] && (byKey[d].status === 'Failed' || byKey[d].blocked));
+            let r;
+            if (badPrereqs.length) {
+              r = { key: entry.key, status: 'Skipped', blocked: true, resourceName: '', resourceId: '', parameters: {},
+                    error: `Not deployed because prerequisite ${badPrereqs.join(', ')} did not succeed.` };
+              core.warning(`${entry.label || entry.key}: ${r.error}`);
+            } else {
+              try { await refreshLogin(); }
+              catch (err) {
+                r = { key: entry.key, status: 'Failed', resourceName: '', resourceId: '', parameters: {}, error: summarize(err.message) };
+              }
+              if (!r) {
+                const secureValues = {}, secretNames = {};
+                for (const [p, name] of Object.entries(entry.secrets || {})) { secureValues[p] = secretPool[name] || ''; secretNames[p] = name; }
+                r = await deployOne({ ...entry, secureValues, secretNames });
+              }
+              core.info(`Result: ${r.status}${r.error ? ' - ' + r.error : ''}`);
+            }
+            results.push(r);
+            byKey[entry.key] = r;
+            publish();
+          }
+
+          const failed = results.filter(r => r.status === 'Failed');
+          const blocked = results.filter(r => r.blocked);
+          core.info(`\nPlan finished: ${results.filter(r => r.status === 'Succeeded').length} succeeded, ` +
+            `${results.filter(r => r.status === 'Skipped' && !r.blocked).length} already existed, ${failed.length} failed, ${blocked.length} blocked.`);
+          if (failed.length || blocked.length) {
+            core.setFailed(`Deployment plan did not complete: failed [${failed.map(r => r.key).join(', ')}]` +
+              (blocked.length ? `, blocked by a failed prerequisite [${blocked.map(r => r.key).join(', ')}]` : '') + '.');
+          }

@@ -1,14 +1,25 @@
-@description('Azure OpenAI account name.')
-param accountName string
+// Pike naming: oai-pike-<purpose>-<env>      e.g. oai-pike-assist-dev
+// The custom subdomain (globally unique) uses the same value; uniqueness via "pike".
+
+@description('Environment token.')
+@allowed(['dev', 'qa', 'uat', 'prod'])
+param environmentName string
+
+@description('Workload token (used for the workload tag).')
+@minLength(3)
+@maxLength(60)
+param workload string
+
+@description('Deployment purpose token (input.json target.purpose).')
+@minLength(2)
+@maxLength(11)
+param purpose string
 
 @description('Azure region.')
 param location string
 
 @description('Azure OpenAI SKU name.')
 param skuName string
-
-@description('Custom subdomain name for the Azure OpenAI endpoint.')
-param customSubDomainName string
 
 @description('Public network access setting.')
 @allowed([
@@ -17,8 +28,10 @@ param customSubDomainName string
 ])
 param publicNetworkAccess string
 
-@description('Resource tags.')
+@description('Tags. Must contain owner, cost-center and data-class; env and workload are added here.')
 param tags object
+
+var accountName = 'oai-pike-${purpose}-${environmentName}'
 
 resource openAiService 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
   name: accountName
@@ -28,12 +41,12 @@ resource openAiService 'Microsoft.CognitiveServices/accounts@2023-05-01' = {
     name: skuName
   }
   properties: {
-    customSubDomainName: customSubDomainName
+    customSubDomainName: accountName
     publicNetworkAccess: publicNetworkAccess
   }
-  tags: tags
+  tags: union(tags, { env: environmentName, workload: workload })
 }
 
-output accountId string = openAiService.id
-output accountName string = openAiService.name
-output location string = openAiService.location
+output deployedResourceId string = openAiService.id
+output deployedResourceName string = openAiService.name
+output endpoint string = openAiService.properties.endpoint

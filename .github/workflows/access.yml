@@ -1,0 +1,193 @@
+name: PIKE Access Management - RBAC and PIM
+
+# Called by deploy.yml. One job per access request type:
+#   rbac job -> runs only when input.json accessRequests.rbac = "yes"
+#   pim job  -> runs only when input.json accessRequests.pim  = "yes"
+# The requestor email comes from input.json (accessRequests.<rbac|pim>.requestorEmail);
+# all other request details come from GitHub Environment variables (no values in code).
+# The existing modules under modules/access are deployed through the shared
+# .github/actions/deploy-bicep action. No PowerShell is used.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment (dev, qa, uat, prod).
+        required: true
+        type: string
+      resource-group:
+        description: Target resource group name.
+        required: true
+        type: string
+      rbac:
+        description: yes or no.
+        required: true
+        type: string
+      pim:
+        description: yes or no.
+        required: true
+        type: string
+      rbac-requestor-email:
+        description: Requestor email from input.json accessRequests.rbac.requestorEmail.
+        required: false
+        type: string
+        default: ''
+      pim-requestor-email:
+        description: Requestor email from input.json accessRequests.pim.requestorEmail.
+        required: false
+        type: string
+        default: ''
+      location:
+        description: Azure region from input.json target.location (used for subscription-scope deployments).
+        required: true
+        type: string
+    outputs:
+      rbac-status:
+        value: ${{ jobs.rbac.outputs.status }}
+      rbac-name:
+        value: ${{ jobs.rbac.outputs.resource-name }}
+      rbac-id:
+        value: ${{ jobs.rbac.outputs.resource-id }}
+      rbac-error:
+        value: ${{ jobs.rbac.outputs.error }}
+      pim-status:
+        value: ${{ jobs.pim.outputs.status }}
+      pim-name:
+        value: ${{ jobs.pim.outputs.resource-name }}
+      pim-id:
+        value: ${{ jobs.pim.outputs.resource-id }}
+      pim-error:
+        value: ${{ jobs.pim.outputs.error }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rbac:
+    name: RBAC role assignment
+    if: ${{ inputs.rbac == 'yes' }}
+    runs-on: [self-hosted, X64, Windows]
+    environment: ${{ inputs.environment }}
+    outputs:
+      status: ${{ steps.deploy.outputs.status || 'Failed' }}
+      resource-name: ${{ steps.deploy.outputs.resource-name }}
+      resource-id: ${{ steps.deploy.outputs.resource-id }}
+      error: ${{ steps.deploy.outputs.error || steps.principal.outputs.error }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate scope and resolve principal
+        id: principal
+        uses: actions/github-script@v7
+        env:
+          PREFIX: RBAC
+          SCOPE: ${{ vars.RBAC_SCOPE }}
+          PRINCIPAL_EMAIL: ${{ inputs.rbac-requestor-email }}
+        with:
+          script: |
+            const fail = (m) => { core.setOutput('error', m); core.setFailed(m); };
+            if (!['subscription', 'resourceGroup', 'storageAccount'].includes(process.env.SCOPE || '')) {
+              return fail('RBAC_SCOPE must be subscription, resourceGroup or storageAccount.');
+            }
+            const guid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+            const who = (process.env.PRINCIPAL_EMAIL || '').trim();
+            if (!who) return fail('input.json accessRequests.rbac.requestorEmail is empty.');
+            // The requestor is always a Microsoft Entra user.
+            const args = ['ad', 'user', 'show', '--id', who];
+            const r = await exec.getExecOutput('az', [...args, '--query', 'id', '-o', 'tsv'], { ignoreReturnCode: true, silent: true });
+            const resolved = r.stdout.trim();
+            if (r.exitCode !== 0 || !guid.test(resolved)) return fail(`Could not resolve the requestor user in Microsoft Entra ID.`);
+            core.info('Requestor resolved to a Microsoft Entra object ID (ID not printed).');
+            core.setOutput('id', resolved.toLowerCase());
+
+      - name: Deploy RBAC role assignment
+        id: deploy
+        uses: ./.github/actions/deploy-bicep
+        with:
+          template: ${{ vars.RBAC_SCOPE == 'subscription' && 'modules/access/rbac/RBAC_subscription.bicep' || (vars.RBAC_SCOPE == 'storageAccount' && 'modules/access/rbac/RBAC_resource.bicep' || 'modules/access/rbac/RBAC_resource_group.bicep') }}
+          scope: ${{ vars.RBAC_SCOPE == 'subscription' && 'subscription' || 'resourceGroup' }}
+          resource-group: ${{ inputs.resource-group }}
+          location: ${{ inputs.location }}
+          deployment-name: pike-rbac-${{ github.run_id }}-${{ github.run_attempt }}
+          vars-json: ${{ toJSON(vars) }}
+          values: |
+            principalId=${{ steps.principal.outputs.id }}
+            principalType=User
+          variables: |
+            roleDefinitionGuid=RBAC_READER_ROLE_DEFINITION_ID
+            ${{ vars.RBAC_SCOPE == 'storageAccount' && 'storageAccountName=RBAC_STORAGE_ACCOUNT_NAME' || '' }}
+
+  pim:
+    name: PIM eligibility request
+    needs: rbac
+    # Runs after the RBAC job (or when it was not requested), never in parallel with it.
+    if: ${{ !cancelled() && inputs.pim == 'yes' }}
+    runs-on: [self-hosted, X64, Windows]
+    environment: ${{ inputs.environment }}
+    outputs:
+      status: ${{ steps.deploy.outputs.status || 'Failed' }}
+      resource-name: ${{ steps.deploy.outputs.resource-name }}
+      resource-id: ${{ steps.deploy.outputs.resource-id }}
+      error: ${{ steps.deploy.outputs.error || steps.principal.outputs.error }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate request and resolve principal
+        id: principal
+        uses: actions/github-script@v7
+        env:
+          PRINCIPAL_EMAIL: ${{ inputs.pim-requestor-email }}
+          JUSTIFICATION: ${{ vars.PIM_JUSTIFICATION }}
+        with:
+          script: |
+            const fail = (m) => { core.setOutput('error', m); core.setFailed(m); };
+            if (!(process.env.JUSTIFICATION || '').trim()) return fail('PIM_JUSTIFICATION must be set; PIM requests require a justification.');
+            const guid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+            const who = (process.env.PRINCIPAL_EMAIL || '').trim();
+            if (!who) return fail('input.json accessRequests.pim.requestorEmail is empty.');
+            // The requestor is always a Microsoft Entra user.
+            const args = ['ad', 'user', 'show', '--id', who];
+            const r = await exec.getExecOutput('az', [...args, '--query', 'id', '-o', 'tsv'], { ignoreReturnCode: true, silent: true });
+            const resolved = r.stdout.trim();
+            if (r.exitCode !== 0 || !guid.test(resolved)) return fail(`Could not resolve the requestor user in Microsoft Entra ID.`);
+            core.info('Requestor resolved to a Microsoft Entra object ID (ID not printed).');
+            core.setOutput('id', resolved.toLowerCase());
+
+      # requestType, duration and the role GUID are validated against the allowed values in
+      # modules/access/pim/pim.bicep by the deploy action before anything is submitted.
+      - name: Submit PIM eligibility request
+        id: deploy
+        uses: ./.github/actions/deploy-bicep
+        with:
+          template: modules/access/pim/pim.bicep
+          scope: subscription
+          location: ${{ inputs.location }}
+          deployment-name: pike-pim-${{ github.run_id }}-${{ github.run_attempt }}
+          vars-json: ${{ toJSON(vars) }}
+          values: |
+            principalId=${{ steps.principal.outputs.id }}
+            requestPolicyValidated=true
+          variables: |
+            roleDefinitionGuid=PIM_READER_ROLE_DEFINITION_ID
+            requestType=PIM_REQUEST_TYPE
+            duration=PIM_MAX_DURATION
+            justification=PIM_JUSTIFICATION

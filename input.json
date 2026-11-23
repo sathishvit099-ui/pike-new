@@ -1,0 +1,37 @@
+{
+  "environment": "dev",
+  "target": {
+    "workload": "platform-svc",
+    "system": "sap",
+    "purpose": "app",
+    "location": "eastus"
+  },
+  "resourceTargets": {
+    "resourceGroup": "yes",
+    "networkSecurityGroup": "yes",
+    "routeTable": "yes",
+    "virtualNetwork": "yes",
+    "subnet": "yes",
+    "applicationGatewaySubnet": "no",
+    "loadBalancer": "no",
+    "applicationGateway": "no",
+    "keyVault": "no",
+    "storageAccount": "yes",
+    "sqlDatabase": "yes",
+    "openAi": "yes",
+    "vmWindows": "yes",
+    "vmLinux": "yes",
+    "vmWindowsSql": "yes",
+    "postgresql": "yes"
+  },
+  "accessRequests": {
+    "rbac": {
+      "request": "no",
+      "requestorEmail": "SKumarMunis-Hex-adm@pike.com"
+    },
+    "pim": {
+      "request": "no",
+      "requestorEmail": "SKumarMunis-Hex-adm@pike.com"
+    }
+  }
+}

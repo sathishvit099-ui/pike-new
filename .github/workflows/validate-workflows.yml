@@ -1,0 +1,348 @@
+name: Validate-Workflows
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Bicep, GitHub Actions and input validation
+    runs-on: [self-hosted, X64, Windows]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Bicep is a standalone compiler; validation does not require Azure CLI or Azure login.
+      - name: Install Bicep CLI
+        id: bicep-setup
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bicep = Join-Path $env:RUNNER_TEMP "bicep.exe"
+          Invoke-WebRequest -Uri "https://github.com/Azure/bicep/releases/latest/download/bicep-win-x64.exe" -OutFile $bicep
+          if (-not (Test-Path -LiteralPath $bicep)) { throw "Bicep CLI download failed." }
+          "BICEP_CLI_PATH=$bicep" | Add-Content $env:GITHUB_ENV
+          & $bicep --version
+          if ($LASTEXITCODE -ne 0) { throw "Bicep CLI verification failed." }
+
+      - name: Build and lint every Bicep file
+        id: bicep
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $reportDir = Join-Path $env:RUNNER_TEMP "pike-validation"
+          $buildDir = Join-Path $reportDir "bicep-build"
+          New-Item -ItemType Directory -Path $buildDir -Force | Out-Null
+          $results = [System.Collections.Generic.List[object]]::new()
+          $files = @(Get-ChildItem -Path . -Filter "*.bicep" -File -Recurse |
+            Where-Object { $_.FullName -notmatch '[\\/](\.git|\.bicep-cache)[\\/]' } |
+            Sort-Object FullName)
+
+          if (-not $env:BICEP_CLI_PATH -or -not (Test-Path -LiteralPath $env:BICEP_CLI_PATH)) {
+            $results.Add([pscustomobject]@{ File="(repository)"; Status="FAIL"; Severity="Error"; Code=""; Line=""; Finding="Bicep CLI was not installed. See the Install Bicep CLI step." })
+          } elseif ($files.Count -eq 0) {
+            $results.Add([pscustomobject]@{ File="(repository)"; Status="FAIL"; Severity="Error"; Code=""; Line=""; Finding="No Bicep files were found." })
+          } else {
+            $index = 0
+            foreach ($file in $files) {
+              $index++
+              $relativePath = [IO.Path]::GetRelativePath((Get-Location).Path, $file.FullName)
+              $outFile = Join-Path $buildDir ("module-{0}.json" -f $index)
+              Write-Host "::group::Bicep validation: $relativePath"
+              $output = & $env:BICEP_CLI_PATH build --file $file.FullName --outfile $outFile 2>&1
+              $exitCode = $LASTEXITCODE
+              $diagnostics = @($output | ForEach-Object { "$_".Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+              $matched = 0
+              foreach ($diagnostic in $diagnostics) {
+                $severity = "Info"
+                if ($diagnostic -match '(?i)\b(error|failed)\b') { $severity = "Error" }
+                elseif ($diagnostic -match '(?i)\bwarning\b') { $severity = "Warning" }
+                $code = if ($diagnostic -match '\b(BCP\d+)\b') { $Matches[1] } else { "" }
+                $line = ""
+                if ($diagnostic -match '\((\d+),(\d+)\)') { $line = $Matches[1] }
+                elseif ($diagnostic -match ':(\d+):(\d+)') { $line = $Matches[1] }
+                if ($exitCode -ne 0 -and $severity -eq "Info") { $severity = "Error" }
+                $status = if ($severity -eq "Error") { "FAIL" } elseif ($severity -eq "Warning") { "WARNING" } else { "INFO" }
+                $results.Add([pscustomobject]@{ File=$relativePath; Status=$status; Severity=$severity; Code=$code; Line=$line; Finding=$diagnostic })
+                $matched++
+              }
+              if ($exitCode -ne 0 -and $matched -eq 0) {
+                $results.Add([pscustomobject]@{ File=$relativePath; Status="FAIL"; Severity="Error"; Code=""; Line=""; Finding="Bicep build failed with exit code $exitCode and returned no diagnostic text." })
+              } elseif ($exitCode -eq 0 -and $matched -eq 0) {
+                $results.Add([pscustomobject]@{ File=$relativePath; Status="PASS"; Severity="None"; Code=""; Line=""; Finding="No findings. Bicep compilation completed successfully." })
+              }
+              Write-Host "::endgroup::"
+            }
+          }
+
+          $results | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $reportDir "bicep-findings.json") -Encoding UTF8
+          $failed = @($results | Where-Object Status -eq "FAIL").Count
+          Write-Host "Bicep validation completed for $($files.Count) file(s); error findings: $failed."
+          if ($failed -gt 0) { Write-Warning "Bicep findings were recorded. Continuing to the remaining validations." }
+
+      - name: Install and run actionlint
+        id: actionlint
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $reportDir = Join-Path $env:RUNNER_TEMP "pike-validation"
+          New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+          $outputFile = Join-Path $reportDir "actionlint.txt"
+          $metaFile = Join-Path $reportDir "actionlint-meta.txt"
+          try {
+            $workflowFiles = @(Get-ChildItem ".github/workflows" -File -Recurse |
+              Where-Object { $_.Extension -in @(".yml", ".yaml") } |
+              Sort-Object FullName | ForEach-Object { $_.FullName })
+            if ($workflowFiles.Count -eq 0) { throw "No workflow YAML files found under .github/workflows/." }
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/rhysd/actionlint/releases/latest" -Headers @{
+              Accept = "application/vnd.github+json"
+              "User-Agent" = "PIKE-infrastructure-validation"
+            }
+            $asset = $release.assets | Where-Object { $_.name -match '^actionlint_.*_windows_amd64\.zip$' } | Select-Object -First 1
+            if ($null -eq $asset) { throw "Windows AMD64 actionlint release asset not found." }
+            $zip = Join-Path $env:RUNNER_TEMP "actionlint.zip"
+            $dest = Join-Path $env:RUNNER_TEMP "actionlint"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+            Expand-Archive -Path $zip -DestinationPath $dest -Force
+            $exe = Get-ChildItem $dest -Filter "actionlint.exe" -Recurse -File | Select-Object -First 1
+            if ($null -eq $exe) { throw "actionlint.exe was not found in the downloaded archive." }
+            $lintOutput = & $exe.FullName @workflowFiles 2>&1
+            $code = $LASTEXITCODE
+            $lintOutput | Out-String | Set-Content $outputFile -Encoding UTF8
+            "ExitCode=$code" | Set-Content $metaFile
+            "Version=$($release.tag_name)" | Add-Content $metaFile
+            "Files=$($workflowFiles.Count)" | Add-Content $metaFile
+            if ($lintOutput) { $lintOutput | ForEach-Object { Write-Host $_ } }
+            if ($code -ne 0) { throw "actionlint reported workflow YAML errors." }
+          } catch {
+            $_ | Out-String | Set-Content $outputFile -Encoding UTF8
+            "ExitCode=1" | Set-Content $metaFile
+            throw
+          }
+
+      - name: Validate input.json
+        id: input
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const dir = path.join(process.env.RUNNER_TEMP, 'pike-validation');
+            fs.mkdirSync(dir, { recursive: true });
+            const targets = ['resourceGroup', 'networkSecurityGroup', 'routeTable', 'virtualNetwork', 'subnet',
+              'applicationGatewaySubnet', 'loadBalancer', 'applicationGateway', 'keyVault', 'storageAccount',
+              'sqlDatabase', 'openAi', 'vmWindows', 'vmLinux', 'vmWindowsSql', 'postgresql'];
+            const errors = [];
+            try {
+              const cfg = JSON.parse(fs.readFileSync('input.json', 'utf8'));
+              if (!['dev', 'qa', 'uat', 'prod'].includes(String(cfg.environment ?? '').trim())) errors.push('environment must be dev, qa, uat or prod.');
+              const check = (name, keys) => {
+                const s = cfg[name];
+                if (!s || typeof s !== 'object' || Array.isArray(s)) { errors.push(`${name} must be an object.`); return; }
+                for (const k of Object.keys(s)) if (!keys.includes(k)) errors.push(`${name}.${k} is not a supported key.`);
+                for (const k of keys) if (!['yes', 'no'].includes(String(s[k] ?? '').trim().toLowerCase())) errors.push(`${name}.${k} must be "yes" or "no".`);
+              };
+              const t = cfg.target;
+              if (!t || typeof t !== 'object' || Array.isArray(t)) errors.push('target must be an object with workload, system, purpose and location.');
+              else for (const k of ['workload', 'system', 'purpose', 'location']) if (!String(t[k] ?? '').trim()) errors.push(`target.${k} must be set.`);
+              check('resourceTargets', targets);
+              const ar = cfg.accessRequests;
+              if (!ar || typeof ar !== 'object' || Array.isArray(ar)) errors.push('accessRequests must be an object.');
+              else {
+                for (const k of Object.keys(ar)) if (!['rbac', 'pim'].includes(k)) errors.push(`accessRequests.${k} is not a supported key.`);
+                for (const k of ['rbac', 'pim']) {
+                  const e = ar[k];
+                  if (!e || typeof e !== 'object') { errors.push(`accessRequests.${k} must be an object with request and requestorEmail.`); continue; }
+                  const req = String(e.request ?? '').trim().toLowerCase();
+                  if (!['yes', 'no'].includes(req)) errors.push(`accessRequests.${k}.request must be "yes" or "no".`);
+                  if (req === 'yes' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(e.requestorEmail ?? '').trim())) errors.push(`accessRequests.${k}.requestorEmail must be a valid email when request is "yes".`);
+                }
+              }
+            } catch (err) { errors.push(`input.json could not be parsed: ${err.message}`); }
+            const result = errors.length
+              ? { Status: 'FAIL', Finding: errors.join(' ') }
+              : { Status: 'PASS', Finding: 'input.json passed JSON parsing and structure checks.' };
+            fs.writeFileSync(path.join(dir, 'input-validation.json'), JSON.stringify(result));
+            core.info(result.Finding);
+            if (errors.length) core.setFailed(result.Finding);
+
+      - name: Install and run zizmor
+        id: zizmor
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $reportDir = Join-Path $env:RUNNER_TEMP "pike-validation"
+          New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+          $jsonPath = Join-Path $reportDir "zizmor.json"
+          $metaPath = Join-Path $reportDir "zizmor-meta.txt"
+          try {
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/zizmorcore/zizmor/releases/latest" -Headers @{
+              Accept = "application/vnd.github+json"
+              "User-Agent" = "PIKE-validation"
+            }
+            $asset = $release.assets | Where-Object { $_.name -eq "zizmor-x86_64-pc-windows-msvc.zip" } | Select-Object -First 1
+            if ($null -eq $asset) { throw "Windows x64 zizmor release asset not found." }
+            $zip = Join-Path $env:RUNNER_TEMP "zizmor.zip"
+            $dest = Join-Path $env:RUNNER_TEMP "zizmor"
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+            if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+            Expand-Archive -Path $zip -DestinationPath $dest -Force
+            $exe = Get-ChildItem $dest -Filter "zizmor.exe" -Recurse -File | Select-Object -First 1
+            if ($null -eq $exe) { throw "zizmor.exe was not found in the downloaded archive." }
+            # Findings are written to JSON but do not make the scan step fail.
+            # Real scanner/runtime errors still return a non-zero exit code.
+            $result = & $exe.FullName --no-exit-codes --format=json-v1 .github/workflows 2> (Join-Path $reportDir "zizmor-stderr.txt")
+            $code = $LASTEXITCODE
+            $result | Out-File $jsonPath -Encoding utf8
+            "ExitCode=$code" | Set-Content $metaPath
+            "Version=$($release.tag_name)" | Add-Content $metaPath
+            if ($code -ne 0) { throw "zizmor execution failed with exit code $code." }
+          } catch {
+            if (-not (Test-Path $jsonPath)) { "[]" | Set-Content $jsonPath -Encoding UTF8 }
+            "ExitCode=1" | Set-Content $metaPath
+            throw
+          }
+
+      - name: Generate CSV validation reports
+        id: reports
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = Join-Path $env:RUNNER_TEMP "pike-validation"
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
+          # CSV output uses PowerShell built-in commands; no external reporting module is required.
+          $yamlRows = [System.Collections.Generic.List[object]]::new()
+          $actionMeta = Get-Content (Join-Path $dir "actionlint-meta.txt") -ErrorAction SilentlyContinue
+          $actionOutput = Get-Content (Join-Path $dir "actionlint.txt") -ErrorAction SilentlyContinue
+          $actionStatus = if ($actionMeta -match "ExitCode=0") { "PASS" } elseif ($actionMeta) { "FAIL" } else { "NOT RUN" }
+
+          if ($actionOutput) {
+            foreach ($line in $actionOutput | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
+              $file = ""; $number = ""
+              if ($line -match '^(.+?):(\d+):') { $file = $Matches[1]; $number = $Matches[2] }
+              $yamlRows.Add([pscustomobject]@{ Tool="actionlint"; Status=$actionStatus; Severity=""; WorkflowFile=$file; Line=$number; Finding=$line })
+            }
+          } else {
+            $message = if ($actionStatus -eq "PASS") { "No workflow YAML findings detected." } else { "No diagnostics returned, or actionlint did not run." }
+            $yamlRows.Add([pscustomobject]@{ Tool="actionlint"; Status=$actionStatus; Severity=""; WorkflowFile=""; Line=""; Finding=$message })
+          }
+
+          $zPath = Join-Path $dir "zizmor.json"
+          $zFindings = @()
+          $zParseOk = $false
+          if (Test-Path $zPath) {
+            try {
+              $zFindings = @(Get-Content $zPath -Raw | ConvertFrom-Json -ErrorAction Stop)
+              $zParseOk = $true
+            } catch {
+              $yamlRows.Add([pscustomobject]@{ Tool="zizmor"; Status="ERROR"; Severity=""; WorkflowFile=""; Line=""; Finding="Could not parse zizmor JSON: $($_.Exception.Message)" })
+            }
+          }
+
+          if ($zParseOk -and $zFindings.Count -gt 0) {
+            foreach ($finding in $zFindings) {
+              $locations = @($finding.locations)
+              if ($locations.Count -eq 0) {
+                $yamlRows.Add([pscustomobject]@{
+                  Tool="zizmor"; Status="FINDING"; Severity=[string]$finding.determinations.severity
+                  WorkflowFile=""; Line=""
+                  Finding=("Audit: " + [string]$finding.ident + " | " + [string]$finding.desc)
+                })
+                continue
+              }
+              foreach ($location in $locations) {
+                $file = [string]$location.symbolic.key.Local.verbatim_path
+                $row = $location.concrete.location.start_point.row
+                $line = if ($null -ne $row) { [int]$row + 1 } else { "" }
+                $yamlRows.Add([pscustomobject]@{
+                  Tool="zizmor"; Status="FINDING"; Severity=[string]$finding.determinations.severity
+                  WorkflowFile=$file; Line=$line
+                  Finding=("Audit: " + [string]$finding.ident + " | " + [string]$finding.desc + " | " + [string]$finding.url)
+                })
+              }
+            }
+          } elseif ($zParseOk) {
+            $yamlRows.Add([pscustomobject]@{ Tool="zizmor"; Status="PASS"; Severity=""; WorkflowFile=""; Line=""; Finding="No security findings detected." })
+          } elseif (-not (Test-Path $zPath)) {
+            $yamlRows.Add([pscustomobject]@{ Tool="zizmor"; Status="NOT RUN"; Severity=""; WorkflowFile=""; Line=""; Finding="zizmor did not produce a report." })
+          }
+
+          $inputPath = Join-Path $dir "input-validation.json"
+          if (Test-Path $inputPath) {
+            $inputResult = Get-Content $inputPath -Raw | ConvertFrom-Json
+            $yamlRows.Add([pscustomobject]@{ Tool="input.json"; Status=$inputResult.Status; Severity=""; WorkflowFile="input.json"; Line=""; Finding=$inputResult.Finding })
+          } else {
+            $yamlRows.Add([pscustomobject]@{ Tool="input.json"; Status="NOT RUN"; Severity=""; WorkflowFile="input.json"; Line=""; Finding="input.json validation did not produce a result." })
+          }
+
+          $bicepRows = [System.Collections.Generic.List[object]]::new()
+          $bicepPath = Join-Path $dir "bicep-findings.json"
+          if (Test-Path $bicepPath) {
+            foreach ($finding in @(Get-Content $bicepPath -Raw | ConvertFrom-Json)) {
+              $bicepRows.Add([pscustomobject]@{
+                BicepFile=$finding.File; Status=$finding.Status; Severity=$finding.Severity
+                RuleCode=$finding.Code; Line=$finding.Line; Finding=$finding.Finding
+              })
+            }
+          } else {
+            $bicepRows.Add([pscustomobject]@{ BicepFile="(repository)"; Status="NOT RUN"; Severity=""; RuleCode=""; Line=""; Finding="Bicep validation did not produce findings." })
+          }
+
+          $yamlCsv = Join-Path (Get-Location) "pike-yaml-validation.csv"
+          $bicepCsv = Join-Path (Get-Location) "pike-bicep-validation.csv"
+          $yamlRows.ToArray() | Export-Csv -LiteralPath $yamlCsv -NoTypeInformation -Encoding utf8
+          $bicepRows.ToArray() | Export-Csv -LiteralPath $bicepCsv -NoTypeInformation -Encoding utf8
+
+          Write-Host "Created YAML/security/input report: $yamlCsv ($($yamlRows.Count) rows)"
+          Write-Host "Created Bicep report: $bicepCsv ($($bicepRows.Count) rows)"
+
+      - name: Upload CSV validation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PIKE-Validation-CSV-${{ github.run_id }}
+          path: |
+            pike-yaml-validation.csv
+            pike-bicep-validation.csv
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Summarize validation results (non-blocking)
+        if: always()
+        shell: pwsh
+        run: |
+          $failed = @()
+          foreach ($step in @(
+            @{ Name="Bicep CLI setup"; Outcome="${{ steps.bicep-setup.outcome }}" },
+            @{ Name="Bicep validation"; Outcome="${{ steps.bicep.outcome }}" },
+            @{ Name="actionlint"; Outcome="${{ steps.actionlint.outcome }}" },
+            @{ Name="input.json validation"; Outcome="${{ steps.input.outcome }}" },
+            @{ Name="zizmor"; Outcome="${{ steps.zizmor.outcome }}" },
+            @{ Name="CSV report generation"; Outcome="${{ steps.reports.outcome }}" }
+          )) {
+            if ($step.Outcome -ne "success") { $failed += "$($step.Name): $($step.Outcome)" }
+          }
+
+          if ($failed.Count -gt 0) {
+            Write-Warning "One or more validation steps reported errors:"
+            $failed | ForEach-Object { Write-Warning $_ }
+            Write-Host "The workflow continued and attempted to generate and upload the validation reports."
+          } else {
+            Write-Host "All validation steps completed successfully."
+          }
+          Write-Host "Validation findings are informational and do not block this workflow."
