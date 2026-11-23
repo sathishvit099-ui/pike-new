@@ -1,0 +1,144 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.48.1.52935",
+      "templateHash": "3023644562774269065"
+    }
+  },
+  "parameters": {
+    "principalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Microsoft Entra Object ID of eligible principal."
+      }
+    },
+    "roleDefinitionId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full Azure role definition resource ID."
+      }
+    },
+    "requestType": {
+      "type": "string",
+      "allowedValues": [
+        "AdminAssign",
+        "AdminUpdate",
+        "AdminRemove",
+        "AdminExtend",
+        "AdminRenew"
+      ]
+    },
+    "justification": {
+      "type": "string"
+    },
+    "duration": {
+      "type": "string",
+      "allowedValues": [
+        "PT1H",
+        "PT2H",
+        "PT3H",
+        "PT4H",
+        "PT5H",
+        "PT6H",
+        "PT8H",
+        "PT12H",
+        "PT24H",
+        "P1D",
+        "P2D",
+        "P3D",
+        "P5D",
+        "P7D",
+        "P10D",
+        "P14D",
+        "P15D",
+        "P21D",
+        "P30D",
+        "P45D",
+        "P60D",
+        "P90D",
+        "P120D",
+        "P180D",
+        "P270D",
+        "P365D",
+        "P1W",
+        "P2W",
+        "P3W",
+        "P4W",
+        "P1M",
+        "P2M",
+        "P3M",
+        "P4M",
+        "P6M",
+        "P9M",
+        "P12M",
+        "P1Y",
+        "P2Y"
+      ],
+      "metadata": {
+        "description": "Eligibility duration using one of the supported ISO 8601 duration values listed below."
+      }
+    },
+    "startDateTime": {
+      "type": "string",
+      "defaultValue": "[utcNow('yyyy-MM-ddTHH:mm:ssZ')]"
+    },
+    "requestName": {
+      "type": "string"
+    },
+    "requestPolicyValidated": {
+      "type": "bool",
+      "allowedValues": [
+        true
+      ]
+    },
+    "azureResourcePimPolicy": {
+      "type": "object",
+      "defaultValue": {}
+    },
+    "entraRolePimPolicy": {
+      "type": "object",
+      "defaultValue": {}
+    },
+    "groupPimPolicy": {
+      "type": "object",
+      "defaultValue": {}
+    },
+    "pimAssignmentDefaults": {
+      "type": "object",
+      "defaultValue": {}
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Authorization/roleEligibilityScheduleRequests",
+      "apiVersion": "2024-09-01-preview",
+      "name": "[parameters('requestName')]",
+      "properties": {
+        "principalId": "[parameters('principalId')]",
+        "roleDefinitionId": "[parameters('roleDefinitionId')]",
+        "requestType": "[parameters('requestType')]",
+        "justification": "[parameters('justification')]",
+        "scheduleInfo": {
+          "startDateTime": "[parameters('startDateTime')]",
+          "expiration": {
+            "type": "AfterDuration",
+            "duration": "[parameters('duration')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "eligibilityRequestId": {
+      "type": "string",
+      "value": "[subscriptionResourceId('Microsoft.Authorization/roleEligibilityScheduleRequests', parameters('requestName'))]"
+    },
+    "eligibilityRequestName": {
+      "type": "string",
+      "value": "[parameters('requestName')]"
+    }
+  }
+}

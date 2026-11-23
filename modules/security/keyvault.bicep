@@ -1,13 +1,25 @@
-@description('Globally unique Key Vault name: 3-24 characters, letters, numbers and hyphens; starts with a letter.')
+// Pike naming: kv-pike-<purpose>-<env>      e.g. kv-pike-app-dev
+// Globally unique via the "pike" prefix. Length limit 24: kv-pike-(8) + purpose(<=11) + -(1) + env(<=4) = 24.
+
+@description('Environment token.')
+@allowed(['dev', 'qa', 'uat', 'prod'])
+param environmentName string
+
+@description('Workload token (used for the workload tag).')
 @minLength(3)
-@maxLength(24)
-param keyVaultName string
+@maxLength(60)
+param workload string
+
+@description('Deployment purpose token (input.json target.purpose), lowercase letters/digits.')
+@minLength(2)
+@maxLength(11)
+param purpose string
 
 @description('Azure region.')
 param location string
 
-@description('Microsoft Entra tenant ID.')
-param tenantId string
+@description('Microsoft Entra tenant ID. Defaults to the tenant of the deployment.')
+param tenantId string = tenant().tenantId
 
 @description('Key Vault SKU name.')
 @allowed([
@@ -40,13 +52,15 @@ param softDeleteRetentionInDays int
 ])
 param publicNetworkAccess string
 
-@description('Resource tags.')
+@description('Tags. Must contain owner, cost-center and data-class; env and workload are added here.')
 param tags object
+
+var keyVaultName = 'kv-pike-${purpose}-${environmentName}'
 
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
   location: location
-  tags: tags
+  tags: union(tags, { env: environmentName, workload: workload })
   properties: {
     tenantId: tenantId
     enableRbacAuthorization: enableRbacAuthorization
@@ -60,5 +74,5 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-output keyVaultId string = keyVault.id
-output keyVaultNameOut string = keyVault.name
+output deployedResourceId string = keyVault.id
+output deployedResourceName string = keyVault.name
